@@ -9,3 +9,6 @@
 
 ## 2026-10-12 (later) — headline without the governor; warm-up excluded
 - The first real ticket showed long flat stretches in the governed NAV (CPPI multiplier at its 5 % floor for 300–540 days once a losing sleeve passes ~9 % drawdown) and 64 warm-up days with no positions at the start of calibration. `judge_run.py` now sweeps and reports the headline on the risk framework WITHOUT the drawdown governor (caps, hedge, costs, funding), starts statistics on the first traded day (warm-up counted and excluded), and reports the governed run as a separate "Deployable" line (Sharpe, max DD, avg multiplier, floor-day share, longest floor run). Bar line 3 now reads the governed run: max DD ≤ 10 % and ≤ 25 % of days at the floor. `PASS_BAR.md`, `engine-and-bar`, `TICKET_FORMAT.md` (both repos) updated; `tests/test_engine.py` planted bucket uses a tercile-flat premium.
+
+## 2026-10-12 (decision) — no drawdown governor in the harness; max DD line 20 %
+- Dominik's decision: remove both the step ladder and the CPPI governor from the agentic-harness backtest for now (everything else unchanged: caps, max-loss tiers, gross cap, BTC hedge, cost model, funding). The "Deployable (governed)" line and the floor-share rule are gone; bar line 3 is max drawdown ≤ 20 % on the governor-free run (provisional). Drawdown control is handled at deployment, after Human Review.

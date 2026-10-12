@@ -31,8 +31,7 @@ from validate_config import validate  # noqa: E402
 
 ANN = 365
 CALIB = ("2022-01-01", "2023-12-31")
-RISK_FLOOR = 0.05
-BAR = {"sharpe_min_both": 1.0, "eval_return_min": 0.0, "max_dd_max": 0.10, "floor_share_max": 0.25, "sharpe_2x_min": 0.5, "placebo_t_max": 1.5, "plateau_sharpe_min": 0.7, "plateau_band": 0.5, "top5_share_max": 0.5}
+BAR = {"sharpe_min_both": 1.0, "eval_return_min": 0.0, "max_dd_max": 0.20, "sharpe_2x_min": 0.5, "placebo_t_max": 1.5, "plateau_sharpe_min": 0.7, "plateau_band": 0.5, "top5_share_max": 0.5}
 REFERENCE = ["ref_funding_carry.json", "ref_illiquidity.json", "ref_taker_flow.json"]
 
 
@@ -118,12 +117,6 @@ def main():
     daily, attr, n_rebal = E.run(best, data, risk=True, governor=False); daily = daily[daily.index >= pd.Timestamp(CALIB[0], tz="UTC")]
     first_pos = daily.index[daily["gross"] > 0][0] if (daily["gross"] > 0).any() else daily.index[-1]
     warmup_days = int((first_pos - daily.index[0]).days); daily = daily[daily.index >= first_pos]        # stats start on the first traded day
-    # governed (deployable) run: the production CPPI governor on the same book — reported, not selected on
-    gov, _, _ = E.run(best, data, risk=True, governor=True); gov = gov[gov.index >= first_pos]
-    floor = gov["mult"] <= RISK_FLOOR + 1e-9; runs_ = (floor != floor.shift()).cumsum(); longest_floor = int(floor.groupby(runs_).sum().max()) if floor.any() else 0
-    G = {"calib": stats(win(gov, *CALIB)["ret"]), "eval": stats(win(gov, "2024-01-01", eval_end)["ret"]), "full": stats(gov["ret"])}
-    gov_line = (f"**Deployable (with the CPPI governor)** Sharpe calib {G['calib']['sharpe']:+.2f} / eval {G['eval']['sharpe']:+.2f}, max DD {G['full']['max_dd']:.1%}, "
-                f"avg multiplier {gov['mult'].mean():.2f}, days at the 5% floor {floor.mean():.0%} (longest run {longest_floor} d) — a floored governor makes the NAV line flat; the headline above is the alpha at full risk budget")
     H = {"calibration 2022-01 → 2023-12": stats(win(daily, *CALIB)["ret"]), f"evaluation 2024-01 → {eval_end}": stats(win(daily, "2024-01-01", eval_end)["ret"]), "full": stats(daily["ret"])}
     for y in sorted(set(daily.index.year)):
         H[str(y)] = stats(daily[daily.index.year == y]["ret"])
@@ -153,7 +146,7 @@ def main():
     checks = {
         f"Sharpe ≥ {BAR['sharpe_min_both']} in both windows": (c_["sharpe"] >= BAR["sharpe_min_both"] and e_["sharpe"] >= BAR["sharpe_min_both"], f"calib {c_['sharpe']:+.2f} / eval {e_['sharpe']:+.2f}"),
         "evaluation return > 0": (e_["return"] > BAR["eval_return_min"], f"{e_['return']:+.1%}"),
-        f"max drawdown ≤ {BAR['max_dd_max']:.0%} with the governor and ≤ {BAR['floor_share_max']:.0%} of days at its floor": (G["full"]["max_dd"] >= -BAR["max_dd_max"] and float(floor.mean()) <= BAR["floor_share_max"], f"governed DD {G['full']['max_dd']:.1%}, floor days {floor.mean():.0%}; ungoverned DD {f_['max_dd']:.1%}"),
+        f"max drawdown ≤ {BAR['max_dd_max']:.0%} (full)": (f_["max_dd"] >= -BAR["max_dd_max"], f"{f_['max_dd']:.1%}"),
         f"Sharpe > {BAR['sharpe_2x_min']} at 2× costs (full)": (s_2x["sharpe"] > BAR["sharpe_2x_min"], f"{s_2x['sharpe']:+.2f}"),
         f"placebo (shuffled names) |t| < {BAR['placebo_t_max']}": (abs(placebo_t) < BAR["placebo_t_max"], f"{placebo_t:+.2f} (3 seeds)"),
         f"parameter plateau: neighbours within ±{BAR['plateau_band']:.0%} keep calib Sharpe ≥ {BAR['plateau_sharpe_min']}": (not np.isfinite(plateau) or plateau >= BAR["plateau_sharpe_min"], f"median {plateau:+.2f}" if np.isfinite(plateau) else "no tunables"),
@@ -182,8 +175,8 @@ def main():
         fs.append("not robust to its parameters — neighbouring settings lose most of the result; the chosen point is a knife edge")
     if abs(placebo_t) >= BAR["placebo_t_max"]:
         fs.append("fails the placebo — randomly relabelled names do about as well; the observable reacts to returns rather than predicting them")
-    if G["full"]["max_dd"] < -BAR["max_dd_max"] or float(floor.mean()) > BAR["floor_share_max"]:
-        fs.append("drawdown too deep — the governor would have parked the book (floor days " + f"{floor.mean():.0%}" + "); the construction concentrates risk in time")
+    if f_["max_dd"] < -BAR["max_dd_max"]:
+        fs.append("drawdown too deep — the construction concentrates risk in time; a smoother selection or a longer horizon class")
     if passed:
         watch = [f"{y} was negative" for y, v in H.items() if y.isdigit() and np.isfinite(v["return"]) and v["return"] < 0]
         watch += [f"correlation {v:+.2f} with the {k} sleeve" for k, v in ref_corr.items() if isinstance(v, float) and abs(v) >= 0.4]
@@ -196,10 +189,10 @@ def main():
             return f"| {k} | — | — | — | — | — | — | {v['days']} |"
         return f"| {k} | {v['return']:+.1%} | {v['sharpe']:+.2f} | {v['sortino']:+.2f} | {v['max_dd']:.1%} | {v['worst_day']:+.2%} | {v['hit']:.0%} | {v['days']} |"
     md = [f"[JUDGE RESULT {a.round}/5 — {verdict}]", f"**{a.ticket} — {cfg['hypothesis']}**", f"Framework {a.round}: {cfg['framework'][:220]}{'…' if len(cfg['framework']) > 220 else ''}", "",
-          "**Headline** (best config of the sweep, selected on calibration only; caps, max-loss tiers, BTC hedge, full cost model, funding; NO drawdown governor = the alpha at full risk budget)" + (f"  · first traded day {first_pos.date()} ({warmup_days} warm-up days excluded)" if warmup_days else ""), "",
+          "**Headline** (best config of the sweep, selected on calibration only; caps, max-loss tiers, BTC hedge, full cost model, funding; no drawdown governor)" + (f"  · first traded day {first_pos.date()} ({warmup_days} warm-up days excluded)" if warmup_days else ""), "",
           "| window / year | return | Sharpe | Sortino | max DD | worst day | hit rate | days |", "|---|---|---|---|---|---|---|---|"] + [row(k, v) for k, v in H.items()] + [
           f"\nTurnover {turn:.3f} × N/day · cost drag {cost_yr:.2%}/yr · funding P&L {fund_yr:+.2%}/yr · rebalances {n_rebal} · raw sleeve (no caps/hedge/governor) Sharpe {s_raw['sharpe']:+.2f} · worst 1/7/30 d {worst['worst_1d']:+.1%} / {worst['worst_7d']:+.1%} / {worst['worst_30d']:+.1%}",
-          gov_line, "", "**Bar**", ""] + [f"- {'✓' if v[0] else '✗'} {k}: {v[1]}" for k, v in checks.items()] + [
+          "", "**Bar**", ""] + [f"- {'✓' if v[0] else '✗'} {k}: {v[1]}" for k, v in checks.items()] + [
           "", f"**Sweep** {len(combos)} of {full_size} combinations over {', '.join(keys) if keys else 'no tunables'}; best = " + (", ".join(f"{k.split('.')[-1]}={v}" for k, v in best_ov.items()) if best_ov else "the submitted config") +
           f"; calib Sharpe of the grid: best {sw['sharpe_calib'].max():+.2f}, median {sw['sharpe_calib'].median():+.2f}, worst {sw['sharpe_calib'].min():+.2f}",
           f"**Concentration** top-5 names {top5:.0%} of positive P&L: " + ", ".join(f"{k} {v:+.2%}" for k, v in top5_names.items()) if np.isfinite(top5) else "**Concentration** n/a",
@@ -213,7 +206,7 @@ def main():
     json.dump({"ticket": a.ticket, "round": a.round, "verdict": verdict, "failed": failed, "eval_end": eval_end, "headline": H, "bar": {k: {"pass": bool(v[0]), "value": v[1]} for k, v in checks.items()},
                "sweep": {"keys": keys, "n_run": len(combos), "n_full": full_size, "best": best_ov, "plateau_median_sharpe": plateau, "top10": sw.head(10).to_dict("records")},
                "raw_sleeve": s_raw, "two_x_costs": s_2x, "placebo_t": placebo_t, "placebo_seeds": pl, "top5_share": top5, "top5_names": top5_names, "worst": worst, "reference_corr": ref_corr,
-               "governed": {"headline": G, "avg_mult": float(gov["mult"].mean()), "floor_share": float(floor.mean()), "longest_floor_days": longest_floor}, "first_traded_day": str(first_pos.date()), "warmup_days_excluded": warmup_days, "turnover_per_day": turn, "cost_drag_per_yr": cost_yr, "funding_per_yr": fund_yr, "n_rebalances": n_rebal, "warnings": warns, "for_scout": for_scout},
+               "first_traded_day": str(first_pos.date()), "warmup_days_excluded": warmup_days, "turnover_per_day": turn, "cost_drag_per_yr": cost_yr, "funding_per_yr": fund_yr, "n_rebalances": n_rebal, "warnings": warns, "for_scout": for_scout},
               open(base + "_result.json", "w"), indent=1, default=lambda x: float(x) if isinstance(x, (np.floating, np.integer)) else str(x))
     json.dump(best, open(base + "_best_config.json", "w"), indent=1, ensure_ascii=False)
     try:
