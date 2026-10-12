@@ -14,7 +14,7 @@ hypothesis: <slug> — <one-line hypothesis>
 <one line, plain words, falsifiable>
 
 ## Why it should exist
-<2–4 sentences: who creates the gap, why they behave predictably, why it is not arbitraged away, expected horizon. Cite the idea-map cell and the nearest ledger experiment by identifier.>
+<2–4 sentences: who creates the gap, why they behave predictably, why it is not arbitraged away, expected horizon. Cite the idea-map cell by its id (`reference/IDEA_MAP.json` in scout-config) and the nearest ledger experiment by identifier.>
 
 ## Framework 1/5
 <Plain words a trader can read: what is ranked and over what lookback; who is bought and who is sold (top/bottom N, quantile, threshold); how much per name or per side; how often it rebalances; how long a position is held; what the one-line reason is that THIS construction captures the mechanism.>
