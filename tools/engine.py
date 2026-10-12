@@ -45,7 +45,7 @@ def build_signal(cfg, data):
         if op == "field":
             S[out] = data.field(st["name"]).copy()
         elif op == "const":
-            S[out] = pd.DataFrame(float(st["value"]), index=data.dates, columns=data.symbols)
+            S[out] = pd.DataFrame(float(_resolve(cfg, st["value"])), index=data.dates, columns=data.symbols)
         elif op in ("rolling_mean", "rolling_sum", "rolling_std", "rolling_max", "rolling_min", "rolling_median"):
             w = _int(cfg, st["window"]); mp = _int(cfg, st["min_periods"]) if "min_periods" in st else max(1, int(np.ceil(w * 0.7)))
             r = S[st["in"]].rolling(w, min_periods=mp); S[out] = getattr(r, op.split("_")[1])()
@@ -68,7 +68,7 @@ def build_signal(cfg, data):
         elif op == "sign":
             S[out] = np.sign(S[st["in"]])
         elif op == "clip":
-            S[out] = S[st["in"]].clip(lower=st.get("lo"), upper=st.get("hi"))
+            S[out] = S[st["in"]].clip(lower=_resolve(cfg, st.get("lo")), upper=_resolve(cfg, st.get("hi")))
         elif op in ("add", "sub", "mul", "div", "pow"):
             a, b = S[st["a"]], S[st["b"]]
             S[out] = {"add": a + b, "sub": a - b, "mul": a * b, "div": a / b.replace(0, np.nan), "pow": a ** b}[op]

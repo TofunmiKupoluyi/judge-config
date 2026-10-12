@@ -47,7 +47,7 @@
        "a": {"type": "string"}, "b": {"type": "string"},
        "window": {"description": "rolling/ewm/lag/diff/pct_change: integer days or \"$param\"", "oneOf": [{"type": "integer", "minimum": 1}, {"type": "string"}]},
        "min_periods": {"oneOf": [{"type": "integer", "minimum": 1}, {"type": "string"}]},
-       "lo": {"type": "number"}, "hi": {"type": "number"}, "value": {"type": "number"},
+       "lo": {"oneOf": [{"type": "number"}, {"type": "string"}]}, "hi": {"oneOf": [{"type": "number"}, {"type": "string"}]}, "value": {"oneOf": [{"type": "number"}, {"type": "string"}], "description": "const: number or \"$param\""},
        "cond": {"type": "string", "description": "where: boolean series"}, "then": {"type": "string"}, "else": {"type": "string"},
        "threshold": {"oneOf": [{"type": "number"}, {"type": "string"}]}
       }

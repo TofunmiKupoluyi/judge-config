@@ -65,6 +65,32 @@ def main():
         for ex in sorted(os.listdir(os.path.join(ROOT, "examples"))):
             r = run([os.path.join(TOOLS, "validate_config.py"), os.path.join(ROOT, "examples", ex)])
             check(f"validate {ex}", r.returncode == 0 and r.stdout.startswith("valid:"), r.stdout.strip().splitlines()[0] if r.stdout else r.stderr[-200:])
+        # "$param" in const.value and clip.lo/hi (NOS-20 escalation): the validator accepts a declared
+        # reference and rejects an unknown one or a non-numeric literal; the engine resolves them.
+        base = json.load(open(os.path.join(ROOT, "examples", "ref_illiquidity.json")))
+        def vrun(value, lo=None):
+            c = json.loads(json.dumps(base)); c.setdefault("params", {})["rho"] = {"value": 2.0}
+            c["signal"]["steps"].insert(0, {"op": "const", "value": value, "out": "rho_c"})
+            if lo is not None:
+                c["signal"]["steps"].insert(1, {"op": "clip", "in": "rho_c", "lo": lo, "out": "rho_cc"})
+            p = os.path.join(tmp, "v.json"); json.dump(c, open(p, "w"))
+            return run([os.path.join(TOOLS, "validate_config.py"), p])
+        for name, args, want_ok in (("const value $param", ("$rho",), True),
+                                    ("clip lo $param", (1.0, "$rho"), True),
+                                    ("const unknown $ref", ("$ghost",), False),
+                                    ("const non-numeric value", ("abc",), False)):
+            r = vrun(*args)
+            check(f"validate: {name} → {'valid' if want_ok else 'error'}", (r.returncode == 0) == want_ok,
+                  (r.stdout or r.stderr).strip().splitlines()[0][:100])
+        sys.path.insert(0, TOOLS); import engine as eng; import types
+        stub = types.SimpleNamespace(dates=pd.date_range("2024-01-01", periods=3, tz="UTC"),
+                                     symbols=["AUSDT", "BUSDT"], field=None)
+        outf, _ = eng.build_signal({"params": {"rho": {"value": 7.0}, "hi": {"value": 5.0}},
+                                    "signal": {"steps": [{"op": "const", "value": "$rho", "out": "c"},
+                                                         {"op": "clip", "in": "c", "lo": 0.0, "hi": "$hi", "out": "o"}],
+                                               "output": "o"}}, stub)
+        check("engine: const/clip resolve $param", outf.shape == (3, 2) and float(outf.iloc[0, 0]) == 5.0)
+
         cfg = os.path.join(ROOT, "examples", "ref_illiquidity.json")
         for name, planted, want in (("NOISE", False, "FAIL"), ("PLANTED", True, "PASS")):
             b = os.path.join(tmp, name); build_bucket(b, planted)

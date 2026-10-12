@@ -89,6 +89,8 @@ def validate(cfg):
         elif op == "const":
             if "value" not in st:
                 errors.append(f"{w}: const needs 'value'")
+            else:
+                _p(cfg, st["value"], errors, w)
         elif op in OPS_1:
             if st.get("in") not in produced:
                 errors.append(f"{w}: input {st.get('in')!r} not produced by an earlier step")
@@ -111,6 +113,9 @@ def validate(cfg):
                 errors.append(f"{w}: input not produced")
             if "lo" not in st and "hi" not in st:
                 errors.append(f"{w}: clip needs lo and/or hi")
+            for k in ("lo", "hi"):
+                if k in st:
+                    _p(cfg, st[k], errors, w)
         elif op in ("gt", "lt"):
             if st.get("in") not in produced:
                 errors.append(f"{w}: input not produced")
