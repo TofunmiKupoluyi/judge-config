@@ -34,6 +34,14 @@ import pandas as pd
 BTC = "BTCUSDT"
 
 
+def _aws_env():
+    """Map the desk's secret names onto what s3fs/boto read; never print them."""
+    if os.environ.get("AWS_S3_ACCESS_KEY") and not os.environ.get("AWS_ACCESS_KEY_ID"):
+        os.environ["AWS_ACCESS_KEY_ID"] = os.environ["AWS_S3_ACCESS_KEY"]
+        os.environ["AWS_SECRET_ACCESS_KEY"] = os.environ.get("AWS_S3_ACCESS_KEY_SECRET", "")
+    os.environ.setdefault("AWS_DEFAULT_REGION", "eu-west-2")
+
+
 def log(*a):
     print(time.strftime("%H:%M:%S"), *a, flush=True)
 
@@ -42,12 +50,14 @@ def _read(path, columns=None):
     import pyarrow.parquet as pq
     if path.startswith("s3://"):
         import s3fs  # noqa: F401
+        _aws_env()
     return pq.read_table(path, columns=columns).to_pandas()
 
 
 def _exists(path):
     if path.startswith("s3://"):
         import s3fs
+        _aws_env()
         return s3fs.S3FileSystem().exists(path.replace("s3://", ""))
     return os.path.exists(path)
 
@@ -56,6 +66,7 @@ def _years(root, sub):
     base = f"{root}/{sub}"
     if base.startswith("s3://"):
         import s3fs
+        _aws_env()
         return sorted(int(p.split("year=")[-1]) for p in s3fs.S3FileSystem().ls(base.replace("s3://", "")) if "year=" in p)
     return sorted(int(d.split("=")[-1]) for d in os.listdir(base) if d.startswith("year="))
 

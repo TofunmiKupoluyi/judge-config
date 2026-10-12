@@ -1,29 +1,46 @@
 # judge-config
 
-Configuration for **Judge**, agent B of a two-agent alpha-research desk on Binance USDT-M perpetual futures (market-neutral, cross-sectional). Judge is the systematic half: it critiques and gates the hypothesis tickets that **Scout** (its own config, `scout-config`) posts in Linear, freezes the pre-registration, and — once the test stages are wired — verifies the submitted signal code, runs each hypothesis as a structured standalone strategy through the historical perp data, posts a headline-first report (return and Sharpe per year on top, findings below) with the standard backtest exhibit, keeps the ledger honest, and carries survivors through robustness and portfolio stages to a dossier a human signs. Judge runs as fresh-context sessions triggered by a ticket's status; the ticket is the state machine and Linear (team **NoSyntax**) is Judge's only memory between runs — see `AGENTS.md` §0.
+Configuration and engine for **Judge**, agent B of a two-agent alpha-research desk on Binance USDT-M perpetual futures (market-neutral, cross-sectional). **Scout** (its own repo, `scout-config`) posts experiments to Linear — a one-line alpha hypothesis, a plain-words trade framework and a trade config. Judge runs the config through a fixed backtest engine and reports PASS or FAIL with the headline numbers first and the backtest exhibit attached. Every run is a fresh-context session; Linear (team **NoSyntax**) is the only memory.
+
+## What Judge does with a ticket in Idea Generated
+1. Extracts the newest trade config from the thread (`tools/extract_config.py`; round n = number of previous `[JUDGE RESULT` comments + 1).
+2. Validates it (`tools/validate_config.py`). Invalid → FAIL with the errors, round consumed.
+3. Runs `tools/judge_run.py` once: sweep the declared parameter ranges and alternatives on the **calibration window only** (2022–23) → chosen config over the full sample under the production risk framework → verification battery (raw sleeve, 2× costs, shuffled-name placebos, parameter plateau, concentration, reference-sleeve correlations) → the seven-line pass bar (`reference/PASS_BAR.md`).
+4. Posts the engine's result markdown verbatim as `[JUDGE RESULT n/5 — PASS|FAIL]` (headline table, bar checklist, sweep, concentration, redundancy, a code-written **For Scout** diagnosis), attaches the HTML exhibit, result JSON and the chosen config, and moves the ticket: PASS → **Human Review**; FAIL → **Critiqued** (Scout proposes a materially different framework for the same hypothesis, up to five) or **Discarded** after round 5.
+
+Judge never edits a config, never re-runs to change a verdict, never sees the evaluation window during selection, and never changes the engine, windows, costs or bar — those are human decisions, requested by escalation.
 
 ## Layout
-
 | Path | What it is |
 |---|---|
-| `AGENTS.md` | Judge's master prompt. §0 the Linear protocol and the status table (which statuses are Judge's turn, today and when later stages are wired), §4 the actions, §5 how a result is read, §9 the three human decisions. |
-| `.agents/skills/research-judge/` | Judge's run skill: actions by ticket status, the context-pack queries, the critique/gate JSON, the VERIFY checklist, the strategy pipeline, robustness r1–r9, the portfolio stage and adoption bar, ledger and audit duties. |
-| `.agents/skills/data-and-backtest/` | The data model and panel contract (the `panel` object the battery must supply), point-in-time rules, the fixed battery (target, windows, gates K1–K5, verdicts, costs), the standalone strategy run, the replica stage. |
-| `.agents/skills/binance-futures-data/` | The S3 data bucket: candles (1m/1h/1d), funding, open-interest metrics — layout, schemas, access, pitfalls. |
-| `.claude/skills` | Symlink to `.agents/skills` so Claude Code discovers the skills. |
-| `reference/RISK_FRAMEWORK.md` / `.json` | The production risk model every replica-stage simulation runs under (universe, sizing, caps, hedge, governor, costs, monitoring, adoption bar, rollback rule). The `.json` is the machine-readable twin the battery/replica code reads. |
-| `reference/RESEARCH_PRINCIPLES.md` | The full research framework (41 principles); binding. |
-| `reference/REJECTION_PATTERNS.md` | The five ways 140+ past tests failed on this universe; the critique names the pattern a proposal most risks. |
-| `reference/GLOSSARY.md` | Human names for the production sleeves (`a4` FundingCarry, `a12` IlliquidityPremium, `a90x_ratio` TakerFlow-R) and governors. |
-| `reference/REPORT_FORMAT.md` | The `VERDICT` comment: headline table + gate line first, then the twelve findings sections. |
-| `reference/DOSSIER_FORMAT.md` | The CANDIDATE dossier attached to a Human Review ticket. |
-| `tools/backtest_report.py` | Generates the standard backtest exhibit (per calendar year → monthly returns → $10M metric table → key-metric panels → time-series charts; no note box) from a daily-return series. numpy + pandas only. |
+| `AGENTS.md` | Judge's master prompt: §0 Linear protocol and the four statuses, §2 never-do list, §4 the RUN, §5 how to read a result, §8 the human decisions. |
+| `.agents/skills/research-judge/` | The RUN command by command, validation-fail and engine-failure handling, the reading, Linear tools, runtime. |
+| `.agents/skills/engine-and-bar/` | What the engine does: data and point-in-time rules, config semantics, the risk framework applied to every config, windows and sweep, verification battery, bar, output files. |
+| `.agents/skills/binance-futures-data/` | The S3 bucket (layout, schemas, access) the engine reads. |
+| `tools/judge_run.py` | The whole procedure; `--config --ticket --round --out`; constants `CALIB` and `BAR` at the top. |
+| `tools/engine.py` | Config-driven daily simulator with the risk framework (`reference/RISK_FRAMEWORK.json`). |
+| `tools/data.py` | Point-in-time daily fields from the bucket layout (also works on a local mirror). |
+| `tools/validate_config.py`, `reference/TRADE_CONFIG_SCHEMA.json` | Config language (identical copies in scout-config). |
+| `tools/extract_config.py` | Round number + config from a saved ticket thread; exit 3 = already answered. |
+| `tools/backtest_report.py` | The HTML exhibit (fixed structure, no note box). |
+| `reference/PASS_BAR.md` | The seven bar lines and the windows. |
+| `reference/TICKET_FORMAT.md` | Ticket layout and status transitions (identical copy in scout-config). |
+| `reference/RISK_FRAMEWORK.md` / `.json` | The production risk model (prose + the machine-readable twin the engine loads). |
+| `reference/WHAT_FAILED_BEFORE.md`, `RESEARCH_PRINCIPLES.md`, `GLOSSARY.md` | Context for the reading: the inherited failure patterns, the research stance, the names of the known sleeves. |
+| `examples/` | Three reference sleeves (`ref_*.json`, used for redundancy correlations) and the brief's worked example. |
+| `tests/test_engine.py` | Offline smoke test on a synthetic bucket (noise → FAIL; planted premium → PASS). |
+| `.claude/skills` | Symlink to `.agents/skills`. |
 
-## What Judge touches, and what it never does
-This is a config repo: no research code lives here. Judge's surface is the Linear API (records), the S3 bucket (read-only), the battery the harness author wires (`harness.py`, the robustness and portfolio runners — their contracts are in `data-and-backtest`), and `tools/backtest_report.py`. Judge never edits the battery, windows, gates, cost model, `reference/` or `tools/`; never pushes to a repo; never touches production; never moves a ticket to Human Review for anything but a dossier that passed the adoption bar. Secrets are referenced by name only: `LINEAR_API_KEY`, `AWS_S3_ACCESS_KEY`, `AWS_S3_ACCESS_KEY_SECRET`.
-
-## Status machine (shared with scout-config; the harness author wires the triggers)
-`Idea Generated` (Scout) → Judge: `Critiqued` (Scout revises → Idea Generated) · `Approved for Test` (PREREG frozen) · Closed. When wired: `Approved for Test` → build → Judge VERIFY/battery → `Verdict Posted` → Closed · `Follow-up` (one linked next ticket) · `Robustness` → `Portfolio` → `Human Review` (dossier) · `Discarded` (Scout, on an unfixable hard blocker). Tickets wait in a status whose stage is not wired; Judge never improvises a stage.
+## Running it
+```
+pip install -r requirements.txt
+export AWS_S3_ACCESS_KEY=…  AWS_S3_ACCESS_KEY_SECRET=…        # read-only bucket credentials, by name only
+python3 tools/validate_config.py examples/example_illiquidity_top10.json
+python3 tools/judge_run.py --config examples/example_illiquidity_top10.json --ticket NOS-0 --round 1 --out runs/NOS-0/
+# local mirror / synthetic bucket:  --data /path/to/mirror   (or BINANCE_DATA_ROOT)
+python3 tests/test_engine.py                                    # offline, ~1–2 min, builds its own synthetic bucket
+```
+A full run on the real bucket: data load once (~minutes), ≤ 48 sweep simulations plus ~8 verification runs; 2–4 GB of memory.
 
 ## What must exist outside this repo
-The triggers (a Linear webhook on status change → a Judge run; a weekly schedule for AUDIT/DIGEST) and the battery: a `panel` object per the `data-and-backtest` contract, the K1–K5 gates and verdict, the standalone strategy run that writes the daily series `tools/backtest_report.py` consumes, the robustness runner, and the replica stage reading `reference/RISK_FRAMEWORK.json`. The specs here are its blueprint. Three panel inputs are unprovisioned in the data today (market cap, premium index, full symbol tags — `data-and-backtest` §1).
+The four Linear statuses in team NoSyntax (**Idea Generated**, **Critiqued**, **Discarded**, **Human Review**); the Linear integration on the agent; the bucket credentials in the agent's environment; Python 3.10+ with pandas, numpy, pyarrow, s3fs. Scout's side is `scout-config`.

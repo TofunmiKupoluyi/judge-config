@@ -152,6 +152,35 @@ def main():
     }
     passed = all(v[0] for v in checks.values()); verdict = "PASS" if passed else "FAIL"
     failed = [k for k, v in checks.items() if not v[0]]
+    # ---------------- "For Scout": plain-words diagnosis in the fixed vocabulary of TICKET_FORMAT.md (code-computed, no engine numbers)
+    ret_yr = float(daily["ret"].mean() * ANN); fs = []
+    if (not np.isfinite(c_["sharpe"]) or c_["sharpe"] < 0.5) and (not np.isfinite(e_["sharpe"]) or e_["sharpe"] < 0.5):
+        fs.append("no signal in either window — the ranking does not separate winners from losers at this horizon")
+    elif c_["sharpe"] >= 1.0 and (e_["sharpe"] < 0.5 or e_["return"] <= 0):
+        fs.append("signal only early — it worked in the calibration years and faded afterwards; the participants who created it may be gone")
+    elif e_["sharpe"] >= 1.0 and c_["sharpe"] < 0.5:
+        fs.append("signal only late — absent in the calibration years; one episode or a new participant, not yet a durable mechanism")
+    if s_2x["sharpe"] <= BAR["sharpe_2x_min"] or (ret_yr > 0 and cost_yr > 0.5 * ret_yr):
+        fs.append("costs eat it — the rebalancing bill is a large share of what the spread earns; the construction trades too often for the size of the effect")
+    if fund_yr < 0 and ret_yr > 0 and abs(fund_yr) > 0.5 * ret_yr:
+        fs.append("funding eats it — the legs pay more funding than the spread earns; the ranking selects names on the wrong side of the funding sort")
+    if np.isfinite(top5) and top5 > BAR["top5_share_max"]:
+        fs.append("concentrated — a handful of names make the money; the effect is not broad across the universe")
+    for k, v in ref_corr.items():
+        if isinstance(v, float) and abs(v) >= 0.6:
+            fs.append(f"tracks a known sleeve ({k}) — the ranking largely reproduces an existing construction")
+    if np.isfinite(plateau) and plateau < BAR["plateau_sharpe_min"]:
+        fs.append("not robust to its parameters — neighbouring settings lose most of the result; the chosen point is a knife edge")
+    if abs(placebo_t) >= BAR["placebo_t_max"]:
+        fs.append("fails the placebo — randomly relabelled names do about as well; the observable reacts to returns rather than predicting them")
+    if f_["max_dd"] < -BAR["max_dd_max"]:
+        fs.append("drawdown too deep — the construction concentrates risk in time; a smoother selection or a longer horizon class")
+    if passed:
+        watch = [f"{y} was negative" for y, v in H.items() if y.isdigit() and np.isfinite(v["return"]) and v["return"] < 0]
+        watch += [f"correlation {v:+.2f} with the {k} sleeve" for k, v in ref_corr.items() if isinstance(v, float) and abs(v) >= 0.4]
+        for_scout = "passed the bar" + ("; watch: " + ", ".join(watch) if watch else "")
+    else:
+        for_scout = "; ".join(fs) if fs else "failed the bar without a single dominant cause — see the bar lines above"
     # ---------------- outputs
     def row(k, v):
         if not np.isfinite(v.get("sharpe", np.nan)):
@@ -166,6 +195,7 @@ def main():
           f"; calib Sharpe of the grid: best {sw['sharpe_calib'].max():+.2f}, median {sw['sharpe_calib'].median():+.2f}, worst {sw['sharpe_calib'].min():+.2f}",
           f"**Concentration** top-5 names {top5:.0%} of positive P&L: " + ", ".join(f"{k} {v:+.2%}" for k, v in top5_names.items()) if np.isfinite(top5) else "**Concentration** n/a",
           ("**Redundancy** daily-return correlation with reference sleeves: " + ", ".join(f"{k} {v:+.2f}" if isinstance(v, float) else f"{k} {v}" for k, v in ref_corr.items())) if ref_corr else "",
+          "", f"**For Scout** {for_scout}",
           "", (f"**Next** → Human Review (bar passed)." if passed else f"**Next** → Critiqued: failed {len(failed)} bar line(s) — " + "; ".join(failed) + (". Scout: a different trade framework for the same hypothesis (round " + str(a.round + 1) + "/5)." if a.round < 5 else ". This was round 5/5 → Discarded.")),
           f"Exhibit: {tag}_backtest.html · numbers: {tag}_result.json · config: {tag}_best_config.json"]
     md = "\n".join(x for x in md if x is not None)
@@ -174,7 +204,7 @@ def main():
     json.dump({"ticket": a.ticket, "round": a.round, "verdict": verdict, "failed": failed, "eval_end": eval_end, "headline": H, "bar": {k: {"pass": bool(v[0]), "value": v[1]} for k, v in checks.items()},
                "sweep": {"keys": keys, "n_run": len(combos), "n_full": full_size, "best": best_ov, "plateau_median_sharpe": plateau, "top10": sw.head(10).to_dict("records")},
                "raw_sleeve": s_raw, "two_x_costs": s_2x, "placebo_t": placebo_t, "placebo_seeds": pl, "top5_share": top5, "top5_names": top5_names, "worst": worst, "reference_corr": ref_corr,
-               "turnover_per_day": turn, "cost_drag_per_yr": cost_yr, "funding_per_yr": fund_yr, "n_rebalances": n_rebal, "warnings": warns},
+               "turnover_per_day": turn, "cost_drag_per_yr": cost_yr, "funding_per_yr": fund_yr, "n_rebalances": n_rebal, "warnings": warns, "for_scout": for_scout},
               open(base + "_result.json", "w"), indent=1, default=lambda x: float(x) if isinstance(x, (np.floating, np.integer)) else str(x))
     json.dump(best, open(base + "_best_config.json", "w"), indent=1, ensure_ascii=False)
     try:

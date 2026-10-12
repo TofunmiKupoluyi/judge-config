@@ -1,0 +1,17 @@
+# What failed before — the inherited record, in plain words (binding reading for Scout; cite the pattern a proposal risks and say why it escapes)
+
+More than 140 pre-registered tests ran on this universe between 2022 and 2026; none was adopted. They failed in five recurring ways. These are descriptions of mechanisms and constructions, not of any test's numbers — Scout designs around the patterns, Judge measures.
+
+**1. Ranks without dollars.** The ranking orders names convincingly — the top group does beat the bottom group on paper — but the money is not there once positions are real. Two causes. (a) The spread is a volatility artefact: high-volatility names look like they outperform in compounded (log) terms while earning nothing in simple returns. (b) The short leg pays for the long leg: the names a volatility-, size- or "quality"-style ranking shorts are exactly the ones that receive funding, so the strategy pays funding every eight hours to hold the spread. Lottery-style rankings (max daily return, idiosyncratic volatility, volume volatility, high–low range spreads, "quality") have all died this way. *Defence: say in your notes why the spread is a price move and who pays the funding on each leg.*
+
+**2. Early-only.** Works in 2022–23, flat or wrong-signed afterwards. Typical of anything built on retail positioning ratios, early-listing dynamics or a single market episode. *Defence: a mechanism that names participants who still exist and still have to trade.*
+
+**3. A known sleeve in disguise.** The ranking is, after relabelling, the funding sort, the illiquidity/size sort, or seven-day taker flow — the three constructions the desk already runs (see `GLOSSARY.md`). Price-based liquidity measures, scheduled supply inflation, "trend + momentum + carry" stacks, perp-premium sorts and most quality factors turned out to be one of these. *Defence: name the closest sleeve and say what your observable adds that it does not carry.*
+
+**4. One tercile, one year, one event.** The edge lives only in names too thin to trade at size, in one calendar year, or in a handful of events (listing squeezes, one pump-and-dump episode, one premium regime). *Defence: expect the signal to show up in a reasonable number of tradeable names at any time; say which liquidity tier carries it.*
+
+**5. Placebo-equivalent.** A fixed random relabelling of the names, or the same signal shifted in time, predicts just as well — the feature responds to returns instead of predicting them (wick absorption, flow chasing, display-rollover effects). *Defence: the observable must be something that happens BEFORE the move you want to capture, caused by a participant with a reason.*
+
+**Secondary lessons worth knowing before you propose:** weekly cross-sectional trend is REVERSAL in this universe in every residual form tested (six attempts); flow around funding settlement and day boundaries is worth less than two basis points; cross-venue lead/lag exists only at the hourly scale and is tiny; BTC-dominance regime timing has been tried six times and is dead without a forced-flow mechanism and new data; the large-cap basket trails BTC every year, which is the existing short leg's edge, not a regime to time; hourly taker flow reverses at every horizon; token-unlock dates carry a small pre-week effect that is mostly the names themselves bleeding.
+
+A proposal that walks into one of these is not forbidden — it is tested like any other — but a proposal that walks into one knowingly and says why it is different is the one worth a ticket.
