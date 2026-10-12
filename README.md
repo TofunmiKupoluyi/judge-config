@@ -5,7 +5,7 @@ Configuration and engine for **Judge**, agent B of a two-agent alpha-research de
 ## What Judge does with a ticket in Idea Generated
 1. Extracts the newest trade config from the thread (`tools/extract_config.py`; round n = number of previous `[JUDGE RESULT` comments + 1).
 2. Validates it (`tools/validate_config.py`). Invalid → FAIL with the errors, round consumed.
-3. Runs `tools/judge_run.py` once: sweep the declared parameter ranges and alternatives on the **calibration window only** (2022–23) → chosen config over the full sample under the production risk framework without its drawdown governor (caps, hedge, costs, funding) → verification battery (raw sleeve, 2× costs, shuffled-name placebos, parameter plateau, concentration, reference-sleeve correlations) → the seven-line pass bar (`reference/PASS_BAR.md`).
+3. Runs `tools/judge_run.py` once: sweep the declared parameter ranges and alternatives on the **calibration window only** (2022–23) → chosen config over the full sample through Obsidian's hourly production-replica engine without its drawdown governor (caps, no-trade band, participation cap, BTC hedge, cost model, per-print funding) → verification battery (raw sleeve, 2× costs, shuffled-name placebos, parameter plateau, concentration, reference-sleeve correlations) → the seven-line pass bar (`reference/PASS_BAR.md`).
 4. Posts the engine's result markdown verbatim as `[JUDGE RESULT n/5 — PASS|FAIL]` (headline table, bar checklist, sweep, concentration, redundancy, a code-written **For Scout** diagnosis), attaches the HTML exhibit, result JSON and the chosen config, and moves the ticket: PASS → **Human Review**; FAIL → **Critiqued** (Scout proposes a materially different framework for the same hypothesis, up to five) or **Discarded** after round 5.
 
 Judge never edits a config, never re-runs to change a verdict, never sees the evaluation window during selection, and never changes the engine, windows, costs or bar — those are human decisions, requested by escalation.
@@ -18,7 +18,9 @@ Judge never edits a config, never re-runs to change a verdict, never sees the ev
 | `.agents/skills/engine-and-bar/` | What the engine does: data and point-in-time rules, config semantics, the risk framework applied to every config, windows and sweep, verification battery, bar, output files. |
 | `.agents/skills/binance-futures-data/` | The S3 bucket (layout, schemas, access) the engine reads. |
 | `tools/judge_run.py` | The whole procedure; `--config --ticket --round --out`; constants `CALIB` and `BAR` at the top. |
-| `tools/engine.py` | Config-driven daily simulator with the risk framework (`reference/RISK_FRAMEWORK.json`). |
+| `tools/obsidian_engine.py` | **Obsidian's production-replica engine, verbatim** (`backtest/engine_v2.py`), run hourly with the drawdown governors off. |
+| `tools/engine.py` | Trade-config DSL → daily targets → `run_hourly` (targets handed to the Obsidian engine as its `extra` panel); the old daily simulator survives only as the raw-sleeve diagnostic. |
+| `tools/panels.py` | Hourly panels from the bucket with Obsidian's exact definitions (universe hysteresis, delisting ramp, beta, mdv21, caps, funding). |
 | `tools/data.py` | Point-in-time daily fields from the bucket layout (also works on a local mirror). |
 | `tools/validate_config.py`, `reference/TRADE_CONFIG_SCHEMA.json` | Config language (identical copies in scout-config). |
 | `tools/extract_config.py` | Round number + config from a saved ticket thread; exit 3 = already answered. |

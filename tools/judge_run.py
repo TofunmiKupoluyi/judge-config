@@ -27,6 +27,7 @@ import pandas as pd
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import engine as E   # noqa: E402
 from data import Data  # noqa: E402
+import panels as PN  # noqa: E402
 from validate_config import validate  # noqa: E402
 
 ANN = 365
@@ -87,14 +88,16 @@ def main():
         print("\n".join("error: " + e for e in errs)); sys.exit(2)
     eval_end = a.eval_end or (pd.Timestamp.utcnow().normalize().replace(day=1) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
     os.makedirs(a.out, exist_ok=True); tag = f"{a.ticket}_r{a.round}"
-    data = Data(a.data, start=a.start, end=eval_end)
+    P = PN.load(a.data, start=a.start, end=eval_end); data = Data(a.data, start=a.start, end=eval_end, panels=P)
+    for k in ("high", "low", "trades", "oi_usd", "tbq"):
+        P.pop(k, None)                                           # daily fields built; free the hourly extras before the sims
     # ---------------- sweep on calibration only
     keys, combos, full_size = grid_from(cfg, a.max_grid)
     log(f"sweep: {len(combos)} of {full_size} combinations over {keys or ['(no tunables)']}, calibration window only")
     rows = []
     for c in combos:
         ov = dict(zip(keys, c)); cc = E.with_params(cfg, ov)
-        d, _, _ = E.run(cc, data, risk=True, governor=False, window=CALIB); d = d[d["gross"].cummax() > 0]; s = stats(d["ret"])
+        d, _, _ = E.run_hourly(cc, data, P, window=CALIB); d = d[d["gross"].cummax() > 0]; s = stats(d["ret"])
         rows.append({**{k: v for k, v in ov.items()}, "sharpe_calib": s["sharpe"], "return_calib": s["return"], "max_dd_calib": s["max_dd"], "turnover": float(d["turnover"].mean()) if len(d) else np.nan})
     sw = pd.DataFrame(rows); sw = sw.sort_values("sharpe_calib", ascending=False).reset_index(drop=True)
     best_ov = {k: sw.iloc[0][k] for k in keys}; best_ov = {k: (int(v) if isinstance(v, (np.integer,)) or (isinstance(v, float) and float(v).is_integer() and k.startswith("params.") and (cfg["params"][k.split(".", 1)[1]].get("integer") or cfg["params"][k.split(".", 1)[1]].get("unit") in ("days", "hours", "count"))) else (v.item() if hasattr(v, "item") else v)) for k, v in best_ov.items()}
@@ -114,7 +117,12 @@ def main():
         nb = sw[sw.apply(near, axis=1)]; plateau = float(nb["sharpe_calib"].median()) if len(nb) > 1 else float(sw.iloc[0]["sharpe_calib"])
     # ---------------- the chosen config on the full sample (calib + eval), risk framework
     log("best config: full sample under the risk framework")
-    daily, attr, n_rebal = E.run(best, data, risk=True, governor=False); daily = daily[daily.index >= pd.Timestamp(CALIB[0], tz="UTC")]
+    EVAL = ("2024-01-01", eval_end)
+    def run_full(cfg_, **kw):
+        """Obsidian convention: the calibration and evaluation segments are simulated separately (positions restart at 2024-01-01)."""
+        dc, ac, nc = E.run_hourly(cfg_, data, P, window=CALIB, **kw); de, ae, ne = E.run_hourly(cfg_, data, P, window=EVAL, **kw)
+        return pd.concat([dc, de]), ac.add(ae, fill_value=0.0), nc + ne
+    daily, attr, n_rebal = run_full(best)
     first_pos = daily.index[daily["gross"] > 0][0] if (daily["gross"] > 0).any() else daily.index[-1]
     warmup_days = int((first_pos - daily.index[0]).days); daily = daily[daily.index >= first_pos]        # stats start on the first traded day
     H = {"calibration 2022-01 → 2023-12": stats(win(daily, *CALIB)["ret"]), f"evaluation 2024-01 → {eval_end}": stats(win(daily, "2024-01-01", eval_end)["ret"]), "full": stats(daily["ret"])}
@@ -123,11 +131,11 @@ def main():
     turn = float(daily["turnover"].mean()); cost_yr = float(daily["costs"].mean() * ANN); fund_yr = float(daily["funding"].mean() * ANN)
     # ---------------- verification battery (chosen config only)
     log("verification: raw sleeve, 2x costs, placebo, concentration, reference sleeves")
-    raw, _, _ = E.run(best, data, risk=False); raw = raw[raw.index >= first_pos]; s_raw = stats(raw["ret"])
-    d2x, _, _ = E.run(best, data, risk=True, governor=False, cost_mult=2.0); d2x = d2x[d2x.index >= first_pos]; s_2x = stats(d2x["ret"])
+    raw, _, _ = E.run(best, data, risk=False); raw = raw[raw.index >= first_pos]; s_raw = stats(raw["ret"])      # daily diagnostic: no caps / hedge
+    d2x, _, _ = run_full(best, cost_mult=2.0); d2x = d2x[d2x.index >= first_pos]; s_2x = stats(d2x["ret"])
     pl = []
     for sd in (1, 2, 3):
-        dp, _, _ = E.run(best, data, risk=True, governor=False, shuffle_seed=sd); dp = dp[dp.index >= first_pos]; r = dp["ret"].dropna(); pl.append(float(r.mean() / r.std() * np.sqrt(len(r))) if r.std() > 0 else np.nan)
+        dp, _, _ = run_full(best, shuffle_seed=sd); dp = dp[dp.index >= first_pos]; r = dp["ret"].dropna(); pl.append(float(r.mean() / r.std() * np.sqrt(len(r))) if r.std() > 0 else np.nan)
     placebo_t = float(np.nanmean(pl))
     pos_attr = attr[attr > 0]; top5 = float(pos_attr.sort_values(ascending=False).head(5).sum() / pos_attr.sum()) if pos_attr.sum() > 0 else np.nan
     top5_names = attr.sort_values(ascending=False).head(5).round(4).to_dict()
@@ -138,7 +146,7 @@ def main():
             p = os.path.join(HERE, "..", "examples", rf)
             if os.path.exists(p):
                 try:
-                    rc = json.load(open(p)); dr, _, _ = E.run(rc, data, risk=True, governor=False); ref_corr[rf.replace("ref_", "").replace(".json", "")] = float(daily["ret"].corr(dr["ret"].reindex(daily.index)))
+                    rc = json.load(open(p)); dr, _, _ = run_full(rc); ref_corr[rf.replace("ref_", "").replace(".json", "")] = float(daily["ret"].corr(dr["ret"].reindex(daily.index)))
                 except Exception as e:  # noqa: BLE001
                     ref_corr[rf] = f"error: {e}"
     # ---------------- bar
@@ -189,9 +197,9 @@ def main():
             return f"| {k} | — | — | — | — | — | — | {v['days']} |"
         return f"| {k} | {v['return']:+.1%} | {v['sharpe']:+.2f} | {v['sortino']:+.2f} | {v['max_dd']:.1%} | {v['worst_day']:+.2%} | {v['hit']:.0%} | {v['days']} |"
     md = [f"[JUDGE RESULT {a.round}/5 — {verdict}]", f"**{a.ticket} — {cfg['hypothesis']}**", f"Framework {a.round}: {cfg['framework'][:220]}{'…' if len(cfg['framework']) > 220 else ''}", "",
-          "**Headline** (best config of the sweep, selected on calibration only; caps, max-loss tiers, BTC hedge, full cost model, funding; no drawdown governor)" + (f"  · first traded day {first_pos.date()} ({warmup_days} warm-up days excluded)" if warmup_days else ""), "",
+          "**Headline** (best config of the sweep, selected on calibration only; Obsidian production-replica engine, hourly: caps, max-loss tiers, GMV cap, no-trade band, participation cap, BTC hedge, full cost model, per-print funding; no drawdown governor)" + (f"  · first traded day {first_pos.date()} ({warmup_days} warm-up days excluded)" if warmup_days else ""), "",
           "| window / year | return | Sharpe | Sortino | max DD | worst day | hit rate | days |", "|---|---|---|---|---|---|---|---|"] + [row(k, v) for k, v in H.items()] + [
-          f"\nTurnover {turn:.3f} × N/day · cost drag {cost_yr:.2%}/yr · funding P&L {fund_yr:+.2%}/yr · rebalances {n_rebal} · raw sleeve (no caps/hedge/governor) Sharpe {s_raw['sharpe']:+.2f} · worst 1/7/30 d {worst['worst_1d']:+.1%} / {worst['worst_7d']:+.1%} / {worst['worst_30d']:+.1%}",
+          f"\nTurnover {turn:.3f} × N/day · cost drag {cost_yr:.2%}/yr · funding P&L {fund_yr:+.2%}/yr · rebalances {n_rebal} · raw sleeve (daily, no caps/hedge) Sharpe {s_raw['sharpe']:+.2f} · worst 1/7/30 d {worst['worst_1d']:+.1%} / {worst['worst_7d']:+.1%} / {worst['worst_30d']:+.1%}",
           "", "**Bar**", ""] + [f"- {'✓' if v[0] else '✗'} {k}: {v[1]}" for k, v in checks.items()] + [
           "", f"**Sweep** {len(combos)} of {full_size} combinations over {', '.join(keys) if keys else 'no tunables'}; best = " + (", ".join(f"{k.split('.')[-1]}={v}" for k, v in best_ov.items()) if best_ov else "the submitted config") +
           f"; calib Sharpe of the grid: best {sw['sharpe_calib'].max():+.2f}, median {sw['sharpe_calib'].median():+.2f}, worst {sw['sharpe_calib'].min():+.2f}",

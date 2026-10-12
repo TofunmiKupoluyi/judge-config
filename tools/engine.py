@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
-"""Config-driven backtest engine with the production risk framework (reference/RISK_FRAMEWORK.json) — Judge runs it; nobody edits it per test.
+"""Judge's engine layer. Since 2026-10-12 the headline simulator is OBSIDIAN'S PRODUCTION REPLICA (tools/obsidian_engine.py, a verbatim
+copy of backtest/engine_v2.py) run hourly on the panels of tools/panels.py — see `run_hourly` at the bottom. This file keeps:
 
-  signal   = the config's step list evaluated on the daily point-in-time fields (tools/data.py); "$param" references resolved
-  targets  = positions rule (top/bottom N, quantile, threshold, proportional) on the eligible universe on rebalance days,
-             equal / signal / rank weighting, side_gross_pct per side, held `holding_days` (overlapping entries are averaged)
-  risk     = per-name cap min(5% NAV, 30% MDV21, 20% OI$ when known) with a 0.1% floor; max-loss caps by MDV tier (shorts 2.5/1.67/1.0 %);
-             gross cap 4x; BTC hedge solved each day so |beta$| ≤ 10% and |delta$| ≤ 10% of NAV (band 2%); CPPI governor
-             (mult = clip((9.5% − dd) / (10 σ_u), 5%, 100%), DAL clamp 50%/25% at 5.5%/7.5%); de-risk trades always execute
-  costs    = taker fee 4 bp + half-spread 1/3/8 bp by MDV tier + impact 15 bp × √(trade $ ÷ MDV) on every trade incl. the hedge;
-             funding per day on held positions (longs pay positive funding); `cost_mult` scales fee/spread/impact (2× stress)
-  sim      = daily, at 00:00 UTC: targets from fields known at t (strictly before t), trades at t, P&L earned over day t (t → t+1)
-Returns a daily frame with ret, gross, delta, beta, turnover, req_turnover, costs, funding, mult, n_long, n_short and a per-name
-P&L attribution. Deterministic. `risk=False` gives the raw sleeve (no caps, no hedge, no governor; costs and funding only).
+  build_signal   the trade-config DSL evaluated on the daily point-in-time fields (tools/data.py); "$param" references resolved
+  build_targets  the positions rule (top/bottom N, quantile, threshold, proportional; equal / signal / rank weighting; side_gross_pct or
+                 per_name_bps; holding-period averaging; execution delay) → daily target weights, fraction of notional, pre-risk
+  simulate/run   the original DAILY simulator with a re-implementation of the risk framework — kept ONLY for the raw-sleeve diagnostic
+                 (risk=False: costs and funding, no caps / hedge) and for offline experiments; judge_run.py never uses it with risk=True
+  run_hourly     the headline: daily targets → hourly `extra` panel → obsidian_engine.run with caps, max-loss tiers, GMV cap, no-trade
+                 band, 4-hour resize gate, participation cap, BTC hedge (2% band), fee + spread tiers + impact, per-print funding;
+                 drawdown governors OFF (decision 2026-10-12)
 """
 from __future__ import annotations
 
@@ -247,3 +245,70 @@ def with_params(cfg, overrides):
                 node = node[p]
             node[parts[-1]] = v
     return c
+
+
+# ----------------------------------------------------------------------------------------------------------- Obsidian hourly engine
+# The headline engine since 2026-10-12: Obsidian's production replica (tools/obsidian_engine.py = backtest/engine_v2.py verbatim) run on
+# the hourly panels of tools/panels.py, with the DSL's daily targets handed in as the externally sized `extra` panel
+# (size_components = [] → nothing is reward-sized; caps, max-loss tiers, GMV cap, no-trade band, 4-hour resize gate, participation cap,
+# BTC hedge with its 2% band, taker fee + spread tiers + impact, per-print funding all apply exactly as in production).
+# Drawdown governors OFF (dd_ladder / dd_cppi / dd_glide = False; decision 2026-10-12). The daily `simulate` above is kept only for the
+# raw-sleeve diagnostic (risk=False).
+import obsidian_engine as OE  # noqa: E402
+
+HARNESS_P = dict(OE.RISK2, dd_ladder=False, dd_cppi=False, dd_glide=False, vol_ceiling_ann=0.0, cooldown_loss_frac=0.0, size_components=[])
+EDGE_BPS = 8.0      # constant |edge| handed to the entry hurdle (|edge| × expected_hold_d − 2(spread + fee) ≥ gamma): the production weekly
+                    # sleeves carry ±8 bp, which clears the hurdle in every liquidity tier — so the hurdle never blocks a DSL target; the
+                    # no-entry (delisting) mask still does
+
+
+def targets_hourly(T, hidx):
+    """Daily target weights (row D = book intended from D 00:00, computed from data before D) → hourly panel stamped at OPEN time:
+    row D−1 23:00 is the bar that closes at D 00:00, where the engine trades to the new book; held 24 rows until the next day's row."""
+    X = T.copy(); X.index = X.index - pd.Timedelta(hours=1)
+    return X.reindex(hidx).ffill(limit=23).fillna(0.0)
+
+
+def run_hourly(cfg, data, panels, cost_mult=1.0, shuffle_seed=None, window=None, record=False):
+    """Judge's production-replica run. Returns (daily frame, per-name price-P&L attribution, n_rebalance_days) in the same shape as `run`.
+    window = (a, b) restricts the simulation to that hourly segment (the calibration sweep)."""
+    signal, _ = build_signal(cfg, data)
+    if shuffle_seed is not None:
+        rng = np.random.default_rng(shuffle_seed); perm = rng.permutation(signal.columns.values)
+        signal = pd.DataFrame(signal.values, index=signal.index, columns=perm).reindex(columns=signal.columns)
+    u = cfg.get("universe", {})
+    universe = data.eligible(u.get("min_mdv_usd", 3e6), u.get("min_age_days", 30), tuple(u.get("exclude", [BTC])), u.get("include_only"))
+    T, n_rebal = build_targets(cfg, data, signal, universe)
+    cols = panels["close"].columns
+    extra = targets_hourly(T.reindex(columns=cols).fillna(0.0), panels["hidx"]).astype("float32")   # on the FULL index: the window's
+    P = panels                                                                                         # first day already carries its book
+    if window is not None:
+        P = __import__("panels").slice_panels(panels, *window); extra = extra.loc[P["hidx"][0]:P["hidx"][-1]]
+    hidx = P["hidx"]
+    edge = (np.sign(extra) * EDGE_BPS).astype("float32"); del T, signal; __import__("gc").collect()
+    p = dict(HARNESS_P)
+    if cost_mult != 1.0:
+        for k in ("taker_fee_bps", "spread_bps_liquid", "spread_bps_mid", "spread_bps_illiquid", "impact_k_bps"):
+            p[k] = p[k] * cost_mult
+    if record:
+        p["record_trades"] = True
+    btc_ret = P["close"][BTC].pct_change(fill_method=None)
+    res = OE.run(P["close"], P["qv"], P["fund"], edge, {"cfg": edge}, P["univ"], P["no_entry"], P["beta_btc"].astype("float64"), P["mdv21"], P["cap_w"], btc_ret, p, extra=extra)
+    w = res["weights"]; pnl = res["pnl"]; nav = res["nav"]
+    alt = [c for c in cols if c != BTC]
+    rets = P["close"].pct_change(fill_method=None).fillna(0.0)
+    attr = (w[alt].shift(1).fillna(0.0) * rets[alt]).sum(axis=0)                     # price P&L per name over the run (fraction of NAV)
+    day = lambda s, how: getattr(s.groupby(s.index.floor("D")), how)()  # noqa: E731
+    gross_h = w[alt].abs().sum(axis=1) + pnl["hedge_w"].abs()
+    daily = pd.DataFrame({"ret": nav.resample("1D").last().pct_change(fill_method=None)})
+    daily = daily.iloc[1:] if len(daily) else daily
+    daily["gross"] = day(gross_h, "mean").reindex(daily.index); daily["delta"] = day(pnl["delta"], "mean").reindex(daily.index); daily["beta"] = day(pnl["beta"], "mean").reindex(daily.index)
+    daily["turnover"] = day(pnl["turnover"], "sum").reindex(daily.index); daily["req_turnover"] = day(pnl["req_turnover"], "sum").reindex(daily.index)
+    daily["costs"] = day(pnl["costs"], "sum").reindex(daily.index); daily["funding"] = day(pnl["funding"], "sum").reindex(daily.index)
+    daily["mult"] = 1.0; daily["n_long"] = day((w[alt] > 0).sum(axis=1), "mean").reindex(daily.index); daily["n_short"] = day((w[alt] < 0).sum(axis=1), "mean").reindex(daily.index)
+    daily["hedge_w"] = day(pnl["hedge_w"], "mean").reindex(daily.index)
+    out = (daily.fillna({"ret": 0.0}), attr, n_rebal)
+    if record:
+        return out + (res,)
+    del res, w, pnl, rets; gc_ = __import__("gc"); gc_.collect()
+    return out

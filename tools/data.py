@@ -72,21 +72,29 @@ def _years(root, sub):
 
 
 class Data:
-    def __init__(self, root, start="2021-10-01", end="2026-12-31", perp_only=True):
+    def __init__(self, root, start="2021-10-01", end="2026-12-31", perp_only=True, panels=None):
+        """panels: the hourly frames from tools/panels.py (open-time stamped) — when given, the daily fields are built from them
+        (one load of the bucket for both engines; symbols and universe identical); otherwise the klines are read here."""
         self.root = root.rstrip("/"); self.start = pd.Timestamp(start, tz="UTC"); self.end = pd.Timestamp(end, tz="UTC") + pd.Timedelta(hours=23)
-        log("data: 1h klines")
-        frames = [_read(f"{self.root}/klines/interval=1h/year={y}/data.parquet", columns=["symbol", "time", "high", "low", "close", "quote_volume", "trades", "taker_buy_quote_volume"])
-                  for y in _years(self.root, "klines/interval=1h") if self.start.year <= y <= self.end.year]
-        k = pd.concat(frames, ignore_index=True); del frames
-        k["time"] = pd.to_datetime(k["time"], utc=True) + pd.Timedelta(hours=1)          # open -> close stamp
-        if perp_only:
-            k = k[~k["symbol"].str.contains("_")]
-        k = k[(k["time"] >= self.start) & (k["time"] <= self.end)]
-        hidx = pd.date_range(k["time"].min().floor("D"), k["time"].max(), freq="h", tz="UTC")
-        piv = lambda c: k.pivot(index="time", columns="symbol", values=c).reindex(hidx)  # noqa: E731
-        close_h = piv("close").astype("float64"); qv_h = piv("quote_volume").astype("float64"); tbq_h = piv("taker_buy_quote_volume").astype("float64")
-        high_h = piv("high").astype("float64"); low_h = piv("low").astype("float64"); ntr_h = piv("trades").astype("float64")
-        del k; gc.collect()
+        if panels is not None:
+            sh = lambda f: f.set_axis(f.index + pd.Timedelta(hours=1), copy=False)         # open-time stamp -> close-time stamp (no copy)  # noqa: E731
+            close_h, qv_h, tbq_h = sh(panels["close"]), sh(panels["qv"]), sh(panels["tbq"])
+            high_h, low_h, ntr_h = (sh(panels[k]) if k in panels else close_h * np.nan for k in ("high", "low", "trades"))
+            fund_src = sh(panels["fund"]); hidx = close_h.index
+        else:
+            log("data: 1h klines")
+            frames = [_read(f"{self.root}/klines/interval=1h/year={y}/data.parquet", columns=["symbol", "time", "high", "low", "close", "quote_volume", "trades", "taker_buy_quote_volume"])
+                      for y in _years(self.root, "klines/interval=1h") if self.start.year <= y <= self.end.year]
+            k = pd.concat(frames, ignore_index=True); del frames
+            k["time"] = pd.to_datetime(k["time"], utc=True) + pd.Timedelta(hours=1)          # open -> close stamp
+            if perp_only:
+                k = k[~k["symbol"].str.contains("_")]
+            k = k[(k["time"] >= self.start) & (k["time"] <= self.end)]
+            hidx = pd.date_range(k["time"].min().floor("D"), k["time"].max(), freq="h", tz="UTC")
+            piv = lambda c: k.pivot(index="time", columns="symbol", values=c).reindex(hidx)  # noqa: E731
+            close_h = piv("close").astype("float64"); qv_h = piv("quote_volume").astype("float64"); tbq_h = piv("taker_buy_quote_volume").astype("float64")
+            high_h = piv("high").astype("float64"); low_h = piv("low").astype("float64"); ntr_h = piv("trades").astype("float64")
+            del k; gc.collect(); fund_src = None
         self.symbols = close_h.columns
         day = lambda f, how: self._to_daily(f, how)  # noqa: E731
         F = {}
@@ -101,17 +109,23 @@ class Data:
         first = close_h.apply(lambda s: s.first_valid_index()); last = close_h.apply(lambda s: s.last_valid_index())
         F["age_days"] = pd.DataFrame({s: (self.dates - first[s]).days if first[s] is not None else np.nan for s in self.symbols}, index=self.dates).astype("float64")
         F["age_days"] = F["age_days"].where(F["age_days"] >= 0)
-        # beta (60d hourly, lagged one hour) and BTC-residual return
-        r_h = close_h.pct_change(fill_method=None); rb = r_h[BTC]
-        cov = r_h.rolling(24 * 60, min_periods=24 * 30).cov(rb); var = rb.rolling(24 * 60, min_periods=24 * 30).var()
-        beta_h = cov.div(var, axis=0).clip(-3, 3).shift(1); self.beta = beta_h.loc[self.dates].astype("float64"); del r_h, cov, var, beta_h
+        # beta: the panels' 60-day hourly beta (Obsidian definition) sampled at 00:00 when panels are given; else computed here
+        if panels is not None:
+            self.beta = sh(panels["beta_btc"]).reindex(index=self.dates, columns=self.symbols).astype("float64")
+        else:
+            r_h = close_h.pct_change(fill_method=None); rb = r_h[BTC]
+            cov = r_h.rolling(24 * 60, min_periods=24 * 30).cov(rb); var = rb.rolling(24 * 60, min_periods=24 * 30).var()
+            beta_h = cov.div(var, axis=0).clip(-3, 3).shift(1); self.beta = beta_h.loc[self.dates].astype("float64"); del r_h, cov, var, beta_h
         F["btc_ret"] = pd.DataFrame({s: F["ret"][BTC] for s in self.symbols}, index=self.dates)
         F["resid_ret"] = F["ret"] - self.beta.shift(1) * F["btc_ret"]
         log("data: funding")
-        f = _read(f"{self.root}/funding/data.parquet"); f["time"] = pd.to_datetime(f["time"], utc=True)
-        f = f[(f["time"] >= self.start) & (f["time"] <= self.end) & f["symbol"].isin(self.symbols)]; f["h"] = f["time"].dt.ceil("h")
-        fund_h = f.pivot_table(index="h", columns="symbol", values="funding_rate", aggfunc="sum").reindex(index=hidx, columns=self.symbols).fillna(0.0)
-        F["funding"] = day(fund_h, "sum").fillna(0.0); F["funding_3d"] = F["funding"].rolling(3, min_periods=1).sum(); del f, fund_h
+        if fund_src is not None:
+            fund_h = fund_src.reindex(index=hidx, columns=self.symbols).fillna(0.0)
+        else:
+            f = _read(f"{self.root}/funding/data.parquet"); f["time"] = pd.to_datetime(f["time"], utc=True)
+            f = f[(f["time"] >= self.start) & (f["time"] <= self.end) & f["symbol"].isin(self.symbols)]; f["h"] = f["time"].dt.ceil("h")
+            fund_h = f.pivot_table(index="h", columns="symbol", values="funding_rate", aggfunc="sum").reindex(index=hidx, columns=self.symbols).fillna(0.0); del f
+        F["funding"] = day(fund_h, "sum").fillna(0.0); F["funding_3d"] = F["funding"].rolling(3, min_periods=1).sum(); del fund_h
         log("data: daily metrics")
         try:
             m = _read(f"{self.root}/metrics/interval=1d/data.parquet"); m["time"] = pd.to_datetime(m["time"], utc=True) + pd.Timedelta(days=1)
@@ -126,8 +140,8 @@ class Data:
                 F[dst] = pd.DataFrame(np.nan, index=self.dates, columns=self.symbols)
         F["mcap"] = pd.DataFrame(np.nan, index=self.dates, columns=self.symbols)
         self.F = {k: v.reindex(index=self.dates, columns=self.symbols).astype("float64") for k, v in F.items()}
-        self.last_valid = last; self.hourly_close = close_h
-        del qv_h, tbq_h, high_h, low_h, ntr_h; gc.collect()
+        self.last_valid = last; self.hourly_close = close_h if panels is None else None; self.hourly_end = close_h.index[-1]
+        del qv_h, tbq_h, high_h, low_h, ntr_h, close_h; gc.collect()
         log(f"data: {len(self.dates)} days × {len(self.symbols)} symbols, {self.dates[0].date()} → {self.dates[-1].date()}")
 
     def _to_daily(self, frame, how):
@@ -147,7 +161,7 @@ class Data:
             state = np.where(state, s[i], e[i]); out[i] = state
         u = pd.DataFrame(out, index=self.dates, columns=self.symbols) & (self.F["age_days"] >= min_age_days)
         for sym, lv in self.last_valid.items():                                         # delisting ramp
-            if lv is not None and lv < self.hourly_close.index[-1] - pd.Timedelta(days=3):
+            if lv is not None and lv < self.hourly_end - pd.Timedelta(days=3):
                 u.loc[u.index >= lv - pd.Timedelta(days=7), sym] = False
         for x in exclude or ():
             if x in u.columns:
