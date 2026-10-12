@@ -8,7 +8,7 @@ All numbers are for the **chosen configuration** (the sweep's best point, select
 | 2 | Evaluation return | cumulative net return over the evaluation window > 0 | Sharpe can be positive on a rounding error; the untouched window must have made money |
 | 3 | Drawdown | maximum drawdown over the full sample ≤ 20 % (NAV, daily; no governor) | provisional (2026-10-12): wide enough that the governor-free run is judged on its signal; the production program's 10 % hard stop is applied at deployment, with a governor |
 | 4 | Cost stress | Sharpe at 2× fee, spread and impact (full sample) > 0.5 | live costs have run near the model's; a framework that dies at 2× has no margin for a bad execution month |
-| 5 | Placebo | mean |t| of the daily returns over three fixed random relabellings of the names (seeds 1–3) < 1.5 | if shuffled names do as well, the construction (hedge, governor, sizing) is earning the return, not the ranking |
+| 5 | Placebo | mean |t| of the daily returns over three fixed random relabellings of the names (seeds 1–3) < 1.5 | if shuffled names do as well, the construction (hedge, caps, sizing) is earning the return, not the ranking |
 | 6 | Parameter plateau | median calibration Sharpe of the grid points within ±50% of every chosen parameter ≥ 0.7 (alternatives must match the chosen ones) | a knife-edge optimum is a sweep artefact; "no tunables" passes vacuously |
 | 7 | Concentration | the top 5 names' share of positive per-name P&L ≤ 50% | an effect that lives in five names is an anecdote, and is uncapturable at size |
 

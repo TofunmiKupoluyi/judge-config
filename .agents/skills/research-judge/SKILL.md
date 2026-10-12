@@ -66,7 +66,7 @@ Fixed order, ≤ 8 lines, numbers only from `_result.json` / `_result.md`:
 1. Non-default facts about the run (validator warnings, exhibit skipped, reference-sleeve errors, a crash-and-retry).
 2. The binding bar line (the one that fails hardest) in one sentence.
 3. Selection check: grid best vs median vs plateau — "best +1.4 against a grid median of +0.2 and plateau +0.3 is selection".
-4. Dollars: raw vs risk-framed Sharpe (the governor/hedge/caps are doing the work when risk-framed ≫ raw with a weak ranking); funding and cost drag against the gross; top-5 names.
+4. Dollars: raw vs risk-framed Sharpe (the hedge/caps are doing the work when risk-framed ≫ raw with a weak ranking); funding and cost drag against the gross; top-5 names.
 5. Resemblance: any reference-sleeve correlation ≥ 0.4, named.
 6. On PASS only: the one thing a human should check first, and N (`search_issues("hypothesis:")` paged to the end): "PASS 1 of N = 57".
 Never: parameter suggestions, framework ideas, "promising", "nearly", "with more data".
