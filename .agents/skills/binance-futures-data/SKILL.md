@@ -1,6 +1,6 @@
 ---
 name: binance-futures-data
-description: Use when you need historical Binance USD-M futures data for backtesting or analysis - candles (1m, 1h, 1d), funding rates, open interest and long/short ratios. Explains the S3 bucket layout, schemas, access and pitfalls.
+description: Use when you need historical Binance USD-M futures data for backtesting or analysis - candles (1m, 1h, 1d), funding rates, open interest and long/short ratios, and daily taker order-flow dollars by trade size. Explains the S3 bucket layout, schemas, access and pitfalls.
 ---
 
 # Binance USD-M futures data (S3)
@@ -13,10 +13,11 @@ Here:
 - **Candles (klines)** for every USD-M futures contract, perpetual and dated delivery, live and delisted. Resolutions: 1 minute, 1 hour, 1 day. About 1.05 billion 1m rows, from January 2020.
 - **Funding rates** for every perpetual, one row per settlement, from January 2020.
 - **Metrics** at 5-minute resolution, from September 2020: open interest, plus long/short and taker buy/sell ratios. Also a daily snapshot file.
+- **Taker flow** daily per symbol, from January 2020: taker buy and sell dollars and trade counts split into six trade-size buckets, built from Binance's aggTrades dumps, with net and gross summary columns for the whole day and for the small (under $1k) and large ($100k and over) tails.
 
 Not here:
 - Spot or COIN-M data. Symbol names such as BTCUSDT match spot names, but everything in this bucket is the futures contract.
-- Liquidations, mark price, index price, order books, individual trades.
+- Liquidations, mark price, index price, order books. Individual trades are not kept either — only their daily taker-flow aggregation above.
 - The most recent hours. For live or very recent values, call the Binance futures API directly.
 
 Prices are last traded price, not mark price. Liquidations and funding payments on Binance are computed from mark price, so treat liquidation modelling from this data as approximate.
@@ -61,6 +62,9 @@ s3://binance-data-546016014952-eu-west-2-an/v1/binance/um/
         year=<YYYY>/data.parquet     one file per symbol per calendar year
     interval=1d/
       data.parquet                   all symbols, all history: last 5m row of each UTC day
+  taker_flow/
+    interval=1d/
+      data.parquet                   all symbols, all history: taker $ by trade size, one row per symbol-day
   meta/
     symbols.parquet                  candle coverage: one row per symbol
     metrics_symbols.parquet          metrics coverage: one row per symbol
@@ -81,6 +85,7 @@ The `key=value` folder names follow the Hive convention. With hive partitioning 
 | Funding carry, funding as a signal, funding costs in a backtest | `funding/data.parquet` | a few million rows, tens of MB |
 | Daily open interest or positioning across the universe | `metrics/interval=1d/data.parquet` | under 1M rows |
 | Intraday open interest or ratios for specific symbols | `metrics/interval=5m/symbol=X/year=YYYY/` | a few MB per symbol-year, about 105k rows |
+| Order-flow imbalance, flow by trade size, retail vs large-print activity | `taker_flow/interval=1d/data.parquet` | about 90 MB, under 1M rows |
 
 Start with the coarsest file that answers the question. Screen on daily or hourly data, then pull 1m candles or 5m metrics only for the symbols and periods that matter.
 
@@ -137,6 +142,27 @@ Column names are Binance's own. The ratio descriptions follow Binance's publishe
 
 Same columns with a leading `symbol`. One row per symbol per UTC day, holding the **last** 5m snapshot of that day. `time` is the **start** of the day. Sorted by `symbol`, then `time`.
 
+### Taker flow: taker_flow/interval=1d/data.parquet
+
+One row per symbol per UTC day, built from Binance's aggTrades dumps. One "print" is one aggTrades row: the fills of a single taker order at a single price. Its notional is price × quantity, in USDT, and that notional decides its size bucket:
+
+`lt_100` (< $100) · `100_1k` ($100 to <$1k) · `1k_10k` · `10k_100k` · `100k_1m` · `ge_1m` (≥ $1m)
+
+A print exactly on a boundary goes to the upper bucket.
+
+| Column | Type | Meaning |
+|---|---|---|
+| symbol | string | Contract name |
+| time | timestamp | Start of the UTC day the row aggregates |
+| taker_net_usd | float64 | Taker buy − taker sell $, all prints |
+| taker_gross_usd | float64 | Taker buy + taker sell $, all prints |
+| taker_net_small_usd, taker_gross_small_usd | float64 | Same, prints **under $1k** (`lt_100` + `100_1k`) |
+| taker_net_large_usd, taker_gross_large_usd | float64 | Same, prints of **$100k and over** (`100k_1m` + `ge_1m`) |
+| buy_usd_&lt;bucket&gt;, sell_usd_&lt;bucket&gt; | float64 | Taker buy / sell $ in that bucket (18 raw columns in all) |
+| trades_&lt;bucket&gt; | int64 | Number of prints in that bucket |
+
+"Buy" means the taker was the buyer (aggressive buying); "sell" means the taker was the seller. The six summary columns are exactly sums of the raw bucket columns, so any other split (say, ≥ $10k as "large") can be recomputed from the raw columns without new data. Sorted by `symbol`, then `time`. About 669k rows over 1,049 symbols, from January 2020.
+
 ### meta/symbols.parquet (candle coverage)
 
 | Column | Meaning |
@@ -159,9 +185,11 @@ Columns: `symbol`, `first_time`, `last_time`, `rows_5m`. Metrics start later tha
 | data_through | Last candle time in the bucket |
 | funding_through | Last funding settlement in the bucket |
 | metrics_through | Last metrics snapshot in the bucket |
+| flow_through | Last taker-flow day in the bucket (start-of-day stamp) |
 | symbols, symbols_live, rows_1m | Candle totals |
 | funding_symbols, funding_rows | Funding totals |
 | metrics_symbols, metrics_rows_5m | Metrics totals |
+| flow_symbols, flow_rows | Taker-flow totals |
 | generated_at | When the manifest was last written |
 
 A `*_through` key is absent if that dataset has not been loaded yet.
@@ -172,6 +200,7 @@ A `*_through` key is absent if that dataset has not been loaded yet.
 |---|---|---|
 | Candles | about a day | Loaded from Binance's daily dump files |
 | Metrics | about a day | Loaded from Binance's daily dump files |
+| Taker flow | about a day | Loaded from Binance's daily dump files |
 | Funding | a few hours | Pulled from the Binance API several times a day |
 
 Always read the manifest rather than assuming. The three datasets end at different times, so clip to the earliest `*_through` when combining them.
@@ -179,7 +208,7 @@ Always read the manifest rather than assuming. The three datasets end at differe
 ## Recommended workflow
 
 1. Read `meta/manifest.json` and note the `*_through` times.
-2. Read `meta/symbols.parquet` (and `metrics_symbols.parquet` if you need metrics) to decide which symbols and years you need. They are tiny.
+2. Read `meta/symbols.parquet` (and `metrics_symbols.parquet` if you need metrics) to decide which symbols and years you need. They are tiny. Taker flow has no coverage meta file; get per-symbol coverage from the data file itself — it is small enough to query directly.
 3. Build explicit file paths from that, and read only the columns you need.
 4. Process large 1m or 5m pulls one symbol at a time.
 
@@ -258,6 +287,16 @@ oi_5m = con.execute(f"""
     FROM read_parquet('{ROOT}/metrics/interval=5m/symbol=BTCUSDT/year=2025/data.parquet')
 """).df()
 
+# Daily taker-flow imbalance, with the large-print share of gross
+flow = con.execute(f"""
+    SELECT symbol, time,
+           taker_net_usd / NULLIF(taker_gross_usd, 0)              AS imbalance,
+           taker_net_small_usd / NULLIF(taker_gross_small_usd, 0)  AS small_imbalance,
+           taker_gross_large_usd / NULLIF(taker_gross_usd, 0)      AS large_share
+    FROM read_parquet('{ROOT}/taker_flow/interval=1d/data.parquet')
+    WHERE time >= '2025-01-01'
+""").df()
+
 # Attach to each hourly bar the latest funding rate known at that time
 joined = con.execute(f"""
     SELECT k.time, k.close, f.funding_rate, f.time AS funding_time
@@ -316,6 +355,13 @@ Funding:
 - **Do not assume 8 hours.** Use `interval_hours`, or simply sum `funding_rate` over the window, when annualising or comparing symbols. Intervals differ between contracts and have changed over time.
 - **Funding is paid at an instant.** A position opened just after a settlement and closed just before the next pays nothing. Apply each rate only to positions held at its `time`.
 - **Rates are extreme at times.** Values far from zero are real, not errors, particularly around squeezes and on small contracts.
+
+Taker flow:
+- **A row looks ahead if misused.** A row stamped 2025-03-01 aggregates that whole UTC day, so it is only known after the day closes. Pair it with the next day's decisions, exactly as you would a daily close.
+- **Same-day flow and same-day returns are nearly the same thing.** Net taker flow and the day's return are mechanically correlated; a "signal" built from day T flow predicting day T returns is look-ahead, not alpha.
+- **Print size is not order size.** A large order split into many fills at different prices (or sliced by an algo) shows up as several smaller prints, so the large buckets undercount true large-order activity and the small buckets contain slices of big orders, not only retail.
+- **Buy and sell are taker-side labels.** Every trade has a buyer and a seller; these columns say which side was the aggressor. Buys and sells here never cancel against each other except in the `net` columns.
+- **Missing rows and zero rows differ.** A row of zeros means the day was loaded and had no trades. A missing (symbol, day) row means the day was not loaded — treat it as a gap, not as zero flow.
 
 Metrics:
 - **The daily file looks ahead if misused.** A row stamped 2025-03-01 holds the snapshot from the end of that day. It is only known after the day closes, so pair it with the next day's decisions, exactly as you would a daily close.
