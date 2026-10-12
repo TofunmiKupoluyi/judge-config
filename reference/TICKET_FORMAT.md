@@ -50,10 +50,11 @@ Exactly one fenced ```json block in the description. Judge parses the LAST ```js
 [JUDGE RESULT n/5 — PASS|FAIL]
 <hypothesis and the framework in one line each>
 
-**Headline** (best configuration of the sweep, selected on the calibration window only; full risk framework; net of costs and funding)
+**Headline** (best configuration of the sweep, selected on the calibration window only; caps, hedge, costs, funding; no drawdown governor = the alpha at full risk budget; from the first traded day)
 | window / year | return | Sharpe | Sortino | max DD | worst day | hit rate | days |
 ...
 <turnover · cost drag · funding · raw-sleeve Sharpe · worst 1/7/30 days>
+**Deployable (with the CPPI governor)** Sharpe per window, max DD, average multiplier, share of days at the 5 % floor
 
 **Bar** — one ✓/✗ line per criterion with the number
 

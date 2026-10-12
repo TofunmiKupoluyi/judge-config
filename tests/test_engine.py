@@ -36,7 +36,7 @@ def build_bucket(root, planted, seed=11, n_alts=60):
             r = btc; L = np.log(5e9)
         else:
             L = lvl[j - 1]; rank = (j - 1) / (n_alts - 1)
-            drift = ((0.5 - rank) * 0.0012 / 24) if planted else 0.0
+            drift = ((0.0006 / 24) * (1.0 if rank < 0.34 else (-1.0 if rank > 0.66 else 0.0))) if planted else 0.0   # flat premium inside each tercile: no single name dominates
             r = rng.uniform(0.6, 1.6) * btc + rng.normal(0, 0.006, len(hours)) + drift
         px = 100 * np.exp(np.cumsum(r)); qv = np.exp(rng.normal(L - np.log(24), 0.4, len(hours))); tb = qv * rng.uniform(0.4, 0.6, len(hours))
         rows.append(pd.DataFrame({"symbol": s, "time": hours, "open": px, "high": px * 1.001, "low": px * 0.999, "close": px, "volume": qv / px, "quote_volume": qv,
