@@ -1,0 +1,162 @@
+{
+  "_meta": {
+    "name": "Production risk framework (v2.3 / v2.3.1, CPPI profile) — machine-readable twin of RISK_FRAMEWORK.md",
+    "as_of": "2026-10-10",
+    "units": "weights are fractions of NAV (notional × compounded NAV index); bp = 1e-4; $ amounts at the $10M reference book unless stated",
+    "editable_by_agents": false
+  },
+  "program": {
+    "measure_on": "notional",
+    "hard_stop_dd_from_hwm": 0.10,
+    "hwm_reset_excess": 0.02,
+    "hwm_smoothing_minutes": 60,
+    "dal_ladder": [
+      {"before_dd": 0.06, "gross_cap_frac": 0.50, "restore_below_dd": 0.04},
+      {"before_dd": 0.08, "gross_cap_frac": 0.25, "restore_below_dd": 0.06}
+    ],
+    "indicative_exposure_caps": {"gross": 2.00, "net_abs": 0.30},
+    "scaling_pause_rules": {"rolling_4w_sortino_lt": 1.5, "ptt_dd_gt": 0.05, "execution_or_compliance_concern": true},
+    "notional_schedule_usd": [100000, 250000, 500000, 1000000, 2500000, 5000000, 10000000, 15000000],
+    "notice_days_for_notional_change": 1
+  },
+  "universe": {
+    "venue": "binance-usdm-perp",
+    "underlying_type": "COIN",
+    "hedge_symbol": "BTCUSDT",
+    "mdv21_enter_usd": 3000000,
+    "mdv21_stay_usd": 2000000,
+    "delist_no_entry_days": 14,
+    "delist_exit_days_before_end": 7,
+    "typical_members": [170, 300]
+  },
+  "sizing": {
+    "formula": "raw_usd = sign(e) * max(|e| - gamma_bps, 0) * 1e-4 * sqrt(mdv21_usd) * reward_scale; w = raw_usd / aum; 0 outside universe; production target = mean of 7 phase books",
+    "aum_reference_usd": 10000000,
+    "reward_scale": 40000.0,
+    "gamma_bps": 5.0,
+    "expected_hold_d": 5.0
+  },
+  "caps": {
+    "order": ["liquidity", "concentration", "max_loss", "gmv"],
+    "liquidity": {"frac_oi": 0.20, "frac_mdv": 0.30, "frac_mcap": 0.15, "floor_frac_aum": 0.001, "zero_oi_is_missing": true, "mcap_missing_is_inert": true},
+    "concentration_frac_nav": 0.05,
+    "max_loss": {
+      "loss_budget_frac_aum": 0.05,
+      "tiers_mdv_usd": {"large_ge": 100000000, "medium_ge": 10000000, "small_lt": 10000000},
+      "stress_short": {"large": 2.00, "medium": 3.00, "small": 5.00},
+      "stress_long": {"large": 0.50, "medium": 0.65, "small": 0.80},
+      "implied_short_cap_frac_nav": {"large": 0.025, "medium": 0.0167, "small": 0.010},
+      "implied_long_cap_frac_nav": {"large": 0.10, "medium": 0.077, "small": 0.0625}
+    },
+    "gmv_cap_x_aum": 4.0,
+    "exchange_leverage_setting": 10
+  },
+  "fund_limits": {
+    "beta_cap_frac_nav": 0.10,
+    "delta_cap_frac_nav": 0.10,
+    "beta_estimator": {"window_days": 60, "freq": "hourly", "clip": [-3, 3], "lag_hours": 1},
+    "hedge": {
+      "instrument": "BTCUSDT",
+      "rule": "hedge = clip(-B, max(-B - beta_cap, -D - delta_cap), min(-B + beta_cap, -D + delta_cap)); if empty interval scale alt book by (beta_cap + delta_cap) / |B - D| first (targets projected into the feasible set)",
+      "band_frac_nav": 0.02,
+      "design_envelope_x_cap": 1.2,
+      "envelope_for_btc_position": "|model_btc| + max(|alt_beta_usd|, |alt_delta_usd|) + 0.10 * N"
+    },
+    "lev_cap_gmv_over_equity": 3.0
+  },
+  "governor": {
+    "production_profile": "cppi",
+    "cppi": {
+      "formula": "mult = clip((cppi_stop - dd) / (k * sigma_u), floor, 1.0); dd = 1 - NAV / HWM on compounded NAV, hourly",
+      "cppi_stop": 0.095,
+      "k": 10.0,
+      "floor": 0.05,
+      "sigma_u": {"definition": "EWMA of daily unscaled book return = realised daily NAV return / max(mult, floor)", "span_days": 10, "lambda": 0.18181818, "seed": 0.015, "reseed_at_master_switch": true, "nav_basis_rule": "the governed book's own P&L only (2026-10-09 lesson); discretionary/multi-strategy P&L in the same account must be excluded"},
+      "dal_clamp": [{"dd_ge": 0.055, "mult_le": 0.50}, {"dd_ge": 0.075, "mult_le": 0.25}],
+      "derisk_trades_bypass_band_and_resize_gate": true,
+      "never_fully_flat": true
+    },
+    "alternatives_default_off": {
+      "step_ladder_v22": {"cut1": 0.055, "cut2": 0.075, "rest1": 0.04, "rest2": 0.06, "mult": [0.50, 0.25], "dwell_hours": 1},
+      "third_rung": {"enabled": false, "mult": 0.10},
+      "glide": {"enabled": false, "start": 0.03, "end": 0.09, "floor": 0.10, "exp": 1.0},
+      "cooldown": {"enabled": false, "loss_frac_nav": 0.05, "window_days": 30, "release_ratio": 0.5}
+    }
+  },
+  "trade_gating": {
+    "band_frac_of_target": 0.50,
+    "band_abs_frac_nav": 0.001,
+    "adjust_every_h": 4,
+    "entry_hurdle": "|edge_bps| * expected_hold_d - 2 * (half_spread_tier_bps + fee_bps) >= gamma_bps and not in delisting ramp",
+    "universe_exit_closes": true,
+    "closes_reduce_only": true
+  },
+  "execution": {
+    "order_type": "MARKET",
+    "participation_cap_frac_hourly_volume": 0.05,
+    "defer_remainder_to_next_cycle": true,
+    "max_slices": 10,
+    "slice_interval_s": 120,
+    "slice_cap_frac_hourly_volume": 0.005,
+    "service_timeout_s": 3480,
+    "cycle_reserve_s": 2040,
+    "capacity_language": {"supported_usd": [1000000, 10000000], "execution_dependent_usd": [10000000, 25000000], "not_validated_above_usd": 25000000}
+  },
+  "cost_model": {
+    "taker_fee_bps": 4.0,
+    "half_spread_bps_by_mdv": [{"mdv_ge": 100000000, "bps": 1.0}, {"mdv_ge": 20000000, "bps": 3.0}, {"mdv_lt": 20000000, "bps": 8.0}],
+    "impact_bps": "15 * sqrt(min(trade_usd / mdv21_usd, 1))",
+    "hedge_cost_bps": "fee + 1.0",
+    "funding": "per print, paid/received on held weight",
+    "gauntlet_multiplier": 2.0,
+    "measured_live_2026_10_09": {"fee_bps": 2.75, "slip_vs_bar_close_bps": 0.4, "all_in_bps": 3.1, "modelled_all_in_bps": 8.4, "by_kind_bps": {"OPEN": -14.1, "ADD": 2.7, "TRIM": 2.0, "CLOSE": 22.7, "FLIP": 6.2, "HEDGE": -0.2}, "impact_at_lt_0p5pct_participation_bps": 1.8, "maker_share": 0.0}
+  },
+  "monitoring": {
+    "status_thresholds": {
+      "beta_usd": {"warn_x": 1.0, "breach_x": 1.3},
+      "delta_usd": {"warn_x": 1.0, "breach_x": 1.3},
+      "gmv": {"warn_x": 1.0, "breach_x": 1.5},
+      "leverage": {"limit": 3.0},
+      "margin_ratio": {"warn": 0.5, "breach": 0.8, "liquidation": 1.0},
+      "dd_ladder_1": {"line": 0.055}, "dd_ladder_2": {"line": 0.075},
+      "dd_nickel_6": {"line": 0.06}, "dd_nickel_8": {"line": 0.08}, "dd_hard_10": {"line": 0.10},
+      "shift_liq_down_min": -0.30, "shift_liq_up_min": 0.50,
+      "position_vs_limit": {"warn_x": 1.0, "breach_x": 1.5, "consecutive_cycles": 2},
+      "coverage_min": 0.80
+    },
+    "alert_policy": "one event one message; sound only for strategy breaches or services down; hourly reports silent",
+    "service_silence_minutes": {"trader": 90, "collector": 30},
+    "external_deadman": true
+  },
+  "control_plane": {
+    "file": "control.json",
+    "fields": ["paused", "reduce_only", "gross_cap", "blocklist", "targets"],
+    "operator_holds": {"type": "quantity hold", "capped_at_entry": true, "alpha_ignored": true, "scaled_by_governor": false, "hedged_at": "target", "in_nav_and_margin": true},
+    "master_parameters_editable": false,
+    "flatten_button": false
+  },
+  "accounting": {
+    "truth": "exchange equity",
+    "equity_assets": ["USDT", "USCX"],
+    "pnl_components": ["realized", "funding", "commission", "unrealized_delta", "other"],
+    "other_threshold_frac_notional": 0.001,
+    "internal_transfer_rule": "UM<->margin TRANSFER rows that leave the wallet unchanged are internal, not flows",
+    "tie_out_tolerance_usd": {"per_cycle": 2, "per_window": 5},
+    "dd_segment_rule": "HWM/dd measured inside the current venue's baseline segment"
+  },
+  "governance": {
+    "adoption_bar": {"paired_delta_ge_0_both_windows_at_master_budget": true, "eval_nw_t_ge": 1.5, "survives_cost_multiplier": 2.0, "max_year_worse_points": 3.0, "path": ["research", "robustness", "portfolio", "candidate dossier", "shadow/paper", "small capital", "production"]},
+    "rollback_rule_40_live_days": {
+      "primary": "paired net P&L vs exact previous-master shadow <= -0.015 of notional",
+      "and_one_of": [
+        "mean paired daily diff <= -3 bp/day or cumulative paired diff touches -0.020",
+        "realised turnover > 0.075 x notional/day over four consecutive weeks",
+        "implementation shortfall > model + 2 bp or > 1.3 x model over four weeks",
+        "DD exceeds shadow's by > 0.02 or crosses 0.055 while shadow < 0.04"
+      ],
+      "nav_basis_must_be_stated_in_advance": true
+    },
+    "untouched_window_cells_pct_notional": {"consistent_with_edge": {"A_ge": 1.0, "D_ge": 1.0, "A_over_D_ge": 0.6}, "zero_edge": {"A": [-0.5, 0.5], "D": [-0.75, 0.75]}, "evidence_against": {"A_le": -1.0}, "strong_against_deployment": {"D_le": -1.5}},
+    "turnover_reference_per_day": {"backtest_eval": 0.058, "live_28d_ex_switch": 0.068, "rollback_line": 0.075}
+  }
+}
