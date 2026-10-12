@@ -1,0 +1,94 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "title": "Trade config v1 — what Scout hands to Judge; the only thing the engine reads",
+ "type": "object",
+ "required": ["schema_version", "hypothesis", "framework", "signal", "positions", "schedule"],
+ "additionalProperties": false,
+ "properties": {
+  "schema_version": {"const": "1.0"},
+  "experiment": {"type": "string", "description": "Linear ticket identifier once known (e.g. NOS-14); Scout may leave it empty on round 1"},
+  "round": {"type": "integer", "minimum": 1, "maximum": 5, "description": "framework attempt number within the experiment"},
+  "hypothesis": {"type": "string", "minLength": 10, "maxLength": 300, "description": "one line, plain words: the alpha claim"},
+  "framework": {"type": "string", "minLength": 20, "maxLength": 1200, "description": "plain-words description of how the trade captures the hypothesis (what is ranked, over what lookback, who is bought/sold, how much, how often)"},
+  "universe": {
+   "type": "object", "additionalProperties": false,
+   "properties": {
+    "min_mdv_usd": {"type": "number", "minimum": 0, "default": 3000000, "description": "21-day median daily $ volume to be eligible"},
+    "min_age_days": {"type": "integer", "minimum": 0, "default": 30, "description": "days since first candle"},
+    "exclude": {"type": "array", "items": {"type": "string"}, "default": ["BTCUSDT"]},
+    "include_only": {"type": "array", "items": {"type": "string"}, "description": "optional explicit list (rare)"}
+   }
+  },
+  "params": {
+   "type": "object",
+   "description": "tunables referenced from the signal/positions as \"$name\"; Judge sweeps inside `range` and selects on the calibration window only",
+   "additionalProperties": {
+    "type": "object", "required": ["value"], "additionalProperties": false,
+    "properties": {
+     "value": {"type": "number"},
+     "range": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2, "description": "[min, max] Judge may sweep; omit to pin the value"},
+     "integer": {"type": "boolean", "default": false},
+     "unit": {"type": "string", "enum": ["days", "hours", "count", "ratio", "bps", "none"], "default": "none"}
+    }
+   }
+  },
+  "signal": {
+   "type": "object", "required": ["steps", "output"], "additionalProperties": false,
+   "properties": {
+    "steps": {
+     "type": "array", "minItems": 1, "maxItems": 25,
+     "items": {
+      "type": "object", "required": ["op", "out"], "additionalProperties": false,
+      "properties": {
+       "op": {"type": "string", "enum": ["field", "rolling_mean", "rolling_sum", "rolling_std", "rolling_max", "rolling_min", "rolling_median", "ewm_mean", "lag", "diff", "pct_change", "log", "abs", "neg", "sign", "clip", "add", "sub", "mul", "div", "pow", "zscore_time", "cross_rank", "cross_zscore", "cross_demean", "where", "gt", "lt", "and", "or", "const"]},
+       "out": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+       "name": {"type": "string", "description": "field op: one of the data fields in the spec"},
+       "in": {"type": "string", "description": "single-input ops: the series to transform"},
+       "a": {"type": "string"}, "b": {"type": "string"},
+       "window": {"description": "rolling/ewm/lag/diff/pct_change: integer days or \"$param\"", "oneOf": [{"type": "integer", "minimum": 1}, {"type": "string"}]},
+       "min_periods": {"oneOf": [{"type": "integer", "minimum": 1}, {"type": "string"}]},
+       "lo": {"type": "number"}, "hi": {"type": "number"}, "value": {"type": "number"},
+       "cond": {"type": "string", "description": "where: boolean series"}, "then": {"type": "string"}, "else": {"type": "string"},
+       "threshold": {"oneOf": [{"type": "number"}, {"type": "string"}]}
+      }
+     }
+    },
+    "output": {"type": "string", "description": "the series to rank; HIGHER = more attractive to be LONG"}
+   }
+  },
+  "positions": {
+   "type": "object", "required": ["mode"], "additionalProperties": false,
+   "properties": {
+    "mode": {"type": "string", "enum": ["top_bottom_n", "quantile", "threshold", "proportional"]},
+    "n": {"oneOf": [{"type": "integer", "minimum": 1}, {"type": "string"}], "description": "top_bottom_n: names per side"},
+    "quantile": {"oneOf": [{"type": "number", "exclusiveMinimum": 0, "maximum": 0.5}, {"type": "string"}], "description": "quantile: fraction per side (0.2 = top/bottom fifth)"},
+    "long_above": {"oneOf": [{"type": "number"}, {"type": "string"}]}, "short_below": {"oneOf": [{"type": "number"}, {"type": "string"}]},
+    "long": {"type": "boolean", "default": true}, "short": {"type": "boolean", "default": true},
+    "weighting": {"type": "string", "enum": ["equal", "signal", "rank"], "default": "equal"},
+    "side_gross_pct": {"type": "number", "minimum": 1, "maximum": 100, "default": 50, "description": "target gross per side as % of notional before caps (50 = 1x total gross)"},
+    "per_name_bps": {"type": "number", "minimum": 1, "maximum": 1000, "description": "alternative to side_gross_pct: fixed bps of notional per name"},
+    "hedge_btc": {"type": "boolean", "default": true, "description": "Judge's engine hedges beta to BTC; set false only for a deliberate directional test"}
+   }
+  },
+  "schedule": {
+   "type": "object", "required": ["rebalance"], "additionalProperties": false,
+   "properties": {
+    "rebalance": {"type": "string", "enum": ["1d", "2d", "3d", "1w", "2w"], "description": "how often targets are recomputed"},
+    "anchor": {"type": "string", "enum": ["monday", "any"], "default": "monday"},
+    "holding_days": {"oneOf": [{"type": "integer", "minimum": 1, "maximum": 60}, {"type": "string"}], "description": "how long a position is held after entry (default = rebalance interval)"},
+    "delay_days": {"type": "integer", "minimum": 0, "maximum": 3, "default": 0, "description": "execution delay after the signal date (engine always adds the point-in-time lag; this is extra)"}
+   }
+  },
+  "alternatives": {
+   "type": "object", "additionalProperties": false,
+   "description": "optional alternative rules Judge may also try in the sweep (selection on calibration only)",
+   "properties": {
+    "positions.mode": {"type": "array", "items": {"type": "string", "enum": ["top_bottom_n", "quantile", "proportional"]}},
+    "positions.weighting": {"type": "array", "items": {"type": "string", "enum": ["equal", "signal", "rank"]}},
+    "schedule.rebalance": {"type": "array", "items": {"type": "string", "enum": ["1d", "2d", "3d", "1w", "2w"]}},
+    "signal.output": {"type": "array", "items": {"type": "string"}, "description": "other step outputs that are legitimate rankings of the same idea"}
+   }
+  },
+  "notes": {"type": "string", "maxLength": 1500, "description": "what Scout expects, what would kill the idea, anything Judge should know"}
+ }
+}

@@ -1,0 +1,9 @@
+{"schema_version": "1.0", "experiment": "REF", "round": 1,
+ "hypothesis": "Holding illiquid names earns a premium over liquid ones: thin names outperform the most liquid large caps.",
+ "framework": "Rank names by 21-day Amihud illiquidity (|return| per dollar traded). Buy the top fifth (most illiquid), sell the bottom fifth (most liquid). Equal weight, 50% per side, weekly Monday rebalance, one-week hold.",
+ "universe": {"min_mdv_usd": 3000000, "min_age_days": 30, "exclude": ["BTCUSDT"]},
+ "params": {"lookback_days": {"value": 21, "range": [10, 42], "unit": "days", "integer": true}, "q": {"value": 0.2, "range": [0.1, 0.3], "unit": "ratio"}},
+ "signal": {"steps": [{"op": "field", "name": "ret", "out": "r"}, {"op": "abs", "in": "r", "out": "ar"}, {"op": "field", "name": "volume_usd", "out": "v"}, {"op": "div", "a": "ar", "b": "v", "out": "ami"}, {"op": "rolling_mean", "in": "ami", "window": "$lookback_days", "out": "ami_lb"}, {"op": "log", "in": "ami_lb", "out": "illiq"}], "output": "illiq"},
+ "positions": {"mode": "quantile", "quantile": "$q", "weighting": "equal", "side_gross_pct": 50},
+ "schedule": {"rebalance": "1w", "anchor": "monday", "holding_days": 7},
+ "notes": "Reference sleeve (illiquidity / size proxy)."}

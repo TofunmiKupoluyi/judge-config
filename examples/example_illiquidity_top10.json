@@ -1,0 +1,10 @@
+{"schema_version": "1.0", "experiment": "", "round": 1,
+ "hypothesis": "Holding illiquid assets yields a premium over time.",
+ "framework": "Rank coins by how much price moves per dollar traded over a 21-day lookback. Buy the 10 least liquid names and sell the 10 most liquid, 50 bps of notional per name, rebalanced weekly on Mondays and held for one week.",
+ "universe": {"min_mdv_usd": 3000000, "min_age_days": 30, "exclude": ["BTCUSDT"]},
+ "params": {"lookback_days": {"value": 21, "range": [10, 42], "unit": "days", "integer": true}, "n": {"value": 10, "range": [5, 20], "unit": "count", "integer": true}},
+ "signal": {"steps": [{"op": "field", "name": "ret", "out": "r"}, {"op": "abs", "in": "r", "out": "ar"}, {"op": "field", "name": "volume_usd", "out": "v"}, {"op": "div", "a": "ar", "b": "v", "out": "ami"}, {"op": "rolling_mean", "in": "ami", "window": "$lookback_days", "out": "ami_lb"}, {"op": "log", "in": "ami_lb", "out": "illiq"}], "output": "illiq"},
+ "positions": {"mode": "top_bottom_n", "n": "$n", "weighting": "equal", "per_name_bps": 50},
+ "schedule": {"rebalance": "1w", "anchor": "monday", "holding_days": 7},
+ "alternatives": {"positions.weighting": ["equal", "rank"], "schedule.rebalance": ["1w", "2w"]},
+ "notes": "The worked example from the brief. I expect the long leg to carry negative funding and the short leg to be the liquid large caps; the question is whether the premium survives costs at 10 names a side."}

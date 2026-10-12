@@ -1,0 +1,9 @@
+{"schema_version": "1.0", "experiment": "REF", "round": 1,
+ "hypothesis": "A week of aggressive net buying continues: names hit by taker buyers outperform names hit by taker sellers.",
+ "framework": "Sum taker-buy minus taker-sell dollar volume over 7 days, divide by total dollar volume over the same 7 days. Buy the top fifth, sell the bottom fifth. Equal weight, 50% per side, weekly Monday rebalance, one-week hold.",
+ "universe": {"min_mdv_usd": 3000000, "min_age_days": 30, "exclude": ["BTCUSDT"]},
+ "params": {"lookback_days": {"value": 7, "range": [3, 14], "unit": "days", "integer": true}, "q": {"value": 0.2, "range": [0.1, 0.3], "unit": "ratio"}},
+ "signal": {"steps": [{"op": "field", "name": "taker_buy_usd", "out": "b"}, {"op": "field", "name": "taker_sell_usd", "out": "s"}, {"op": "sub", "a": "b", "b": "s", "out": "net"}, {"op": "rolling_sum", "in": "net", "window": "$lookback_days", "out": "net_lb"}, {"op": "field", "name": "volume_usd", "out": "v"}, {"op": "rolling_sum", "in": "v", "window": "$lookback_days", "out": "v_lb"}, {"op": "div", "a": "net_lb", "b": "v_lb", "out": "imb"}], "output": "imb"},
+ "positions": {"mode": "quantile", "quantile": "$q", "weighting": "equal", "side_gross_pct": 50},
+ "schedule": {"rebalance": "1w", "anchor": "monday", "holding_days": 7},
+ "notes": "Reference sleeve (taker-flow proxy)."}

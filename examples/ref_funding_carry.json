@@ -1,0 +1,9 @@
+{"schema_version": "1.0", "experiment": "REF", "round": 1,
+ "hypothesis": "Being paid the funding rate is an edge: names whose shorts pay funding outperform names whose longs pay it.",
+ "framework": "Each day, average the funding a long paid over the last 3 days per name. Rank the eligible universe; buy the fifth with the most negative funding (shorts pay us), sell the fifth with the most positive (longs pay us). Equal weight, each side 50% of notional, rebalance weekly on Mondays, hold one week.",
+ "universe": {"min_mdv_usd": 3000000, "min_age_days": 30, "exclude": ["BTCUSDT"]},
+ "params": {"lookback_days": {"value": 3, "range": [2, 10], "unit": "days"}, "q": {"value": 0.2, "range": [0.1, 0.3], "unit": "ratio"}},
+ "signal": {"steps": [{"op": "field", "name": "funding", "out": "f"}, {"op": "rolling_mean", "in": "f", "window": "$lookback_days", "out": "f_avg"}, {"op": "neg", "in": "f_avg", "out": "carry"}], "output": "carry"},
+ "positions": {"mode": "quantile", "quantile": "$q", "weighting": "equal", "side_gross_pct": 50},
+ "schedule": {"rebalance": "1w", "anchor": "monday", "holding_days": 7},
+ "notes": "Reference sleeve (funding carry proxy). Used by Judge for redundancy correlations, not as a candidate."}
