@@ -91,6 +91,18 @@ def main():
                                                "output": "o"}}, stub)
         check("engine: const/clip resolve $param", outf.shape == (3, 2) and float(outf.iloc[0, 0]) == 5.0)
 
+        # NOS-40 regression: panel columns are not sorted — targets must land on the ranked names, not on positions
+        dts = pd.date_range("2024-01-01", periods=14, freq="D", tz="UTC"); usyms = pd.Index([f"S{i:02d}" for i in range(20)][::-1])
+        uni = pd.DataFrame(False, index=dts, columns=usyms); uni[list(usyms[:12])] = True
+        sig = pd.DataFrame(np.tile(np.arange(20.0), (14, 1)), index=dts, columns=usyms)
+        T, _ = eng.build_targets({"params": {}, "positions": {"mode": "quantile", "quantile": 0.25, "weighting": "equal", "side_gross_pct": 50},
+                                  "schedule": {"rebalance": "1w", "anchor": "monday", "holding_days": 7}},
+                                 types.SimpleNamespace(dates=dts, symbols=usyms), sig, uni)
+        held = {c for c in T.columns if (T[c] != 0).any()}; want_long, want_short = {"S10", "S09", "S08"}, {"S19", "S18", "S17"}
+        check("engine: build_targets aligns weights by label on unsorted columns (NOS-40)",
+              held == want_long | want_short and all(abs(T[c].max() - 0.5 / 3) < 1e-12 for c in want_long)
+              and all(abs(T[c].min() + 0.5 / 3) < 1e-12 for c in want_short), f"held: {sorted(held)}")
+
         cfg = os.path.join(ROOT, "examples", "ref_illiquidity.json")
         for name, planted, want in (("NOISE", False, "FAIL"), ("PLANTED", True, "PASS")):
             b = os.path.join(tmp, name); build_bucket(b, planted)

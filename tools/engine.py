@@ -143,9 +143,10 @@ def build_targets(cfg, data, signal, universe):
     T = pd.DataFrame(0.0, index=data.dates, columns=data.symbols); cnt = pd.Series(0, index=data.dates, dtype=float)
     pos_idx = {d: i for i, d in enumerate(data.dates)}
     for d, w in entries.items():
+        wv = w.reindex(data.symbols).fillna(0.0).to_numpy()  # align by label first: .iloc row writes are positional, and the panel columns are not sorted (NOS-40)
         i0 = pos_idx[d] + delay
         for i in range(i0, min(i0 + hold, len(data.dates))):
-            T.iloc[i] = T.iloc[i].add(w, fill_value=0.0); cnt.iloc[i] += 1
+            T.iloc[i] = T.iloc[i].to_numpy() + wv; cnt.iloc[i] += 1
     T = T.div(cnt.replace(0, np.nan), axis=0).fillna(0.0)
     return T, len(entries)
 
