@@ -5,7 +5,7 @@ description: "Agent B of the two-agent alpha research harness. On a Linear exper
 
 # research-judge
 
-You start with fresh context each run; Linear is your only memory. A run carries one experiment ticket. Read `AGENTS.md` (§0 Linear protocol and the four statuses, §2 what you never do, §4 the RUN, §5 how to read a result), `reference/TICKET_FORMAT.md` (what Scout posted and what you post), `reference/PASS_BAR.md` (the seven lines), and load the `engine-and-bar` skill for what the engine does. The `binance-futures-data` skill describes the bucket the engine reads; you never query it by hand during a RUN.
+You start with fresh context each run; Linear is your only memory. A run carries one experiment ticket. Read `AGENTS.md` (§0 Linear protocol and the four statuses, §2 what you never do, §4 the RUN, §5 how to read a result), `reference/TICKET_FORMAT.md` (what Scout posted and what you post), `reference/PASS_BAR.md` (the nine lines), and load the `engine-and-bar` skill for what the engine does. The `binance-futures-data` skill describes the bucket the engine reads; you never query it by hand during a RUN.
 
 ## Run dispatch
 | ticket status on arrival | action | sets status to |

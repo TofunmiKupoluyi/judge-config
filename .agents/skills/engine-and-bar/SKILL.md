@@ -21,7 +21,7 @@ Everything below is implemented in `tools/` and parameterised only by `reference
 | `tools/backtest_report.py` | the HTML exhibit (fixed structure, no note box) |
 | `examples/ref_*.json` | the three reference sleeves (funding carry, illiquidity, taker flow) used for the redundancy correlations |
 | `reference/RISK_FRAMEWORK.json` / `.md` | the production risk model the engine applies |
-| `reference/PASS_BAR.md` | the seven bar lines |
+| `reference/PASS_BAR.md` | the nine bar lines (triage for Human Review) |
 
 ## 2. Data and point-in-time rules
 Hourly klines are stamped at bar close; every daily field at row `t` (00:00 UTC) uses only data from before `t`: price fields are the 00:00 close, activity fields are day `t−1`'s aggregates stamped at `t`, metrics (OI, long/short ratios) are day `t−1`'s last snapshot stamped at `t` (forward-filled ≤ 2 days), funding is the sum of prints inside day `t−1` (positive = longs paid). Beta is a 60-day hourly beta to BTC, lagged. Symbols with `_` (delivery contracts) are dropped; `mcap` is NaN (unprovisioned). Fields: `close ret log_ret resid_ret btc_ret high low range_pct volume_usd taker_buy_usd taker_sell_usd taker_imbalance n_trades funding funding_3d mdv21 adv7 amihud21 vol30 oi_usd oi_change_1d ls_ratio_acct ls_ratio_top_acct ls_ratio_top_pos taker_ls_vol age_days mcap` — definitions in the docstring of `tools/data.py` and, for Scout, in scout-config's `trade-config-spec` skill (keep the two in sync).
