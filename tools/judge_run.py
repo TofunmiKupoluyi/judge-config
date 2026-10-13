@@ -32,7 +32,12 @@ from validate_config import validate  # noqa: E402
 
 ANN = 365
 CALIB = ("2022-01-01", "2023-12-31")
-BAR = {"sharpe_min_both": 1.0, "eval_return_min": 0.0, "max_dd_max": 0.20, "sharpe_2x_min": 0.5, "placebo_t_max": 1.5, "plateau_sharpe_min": 0.7, "plateau_band": 0.5, "top5_share_max": 0.5}
+BAR = {"sharpe_min_both": 0.5, "sharpe_min_eval": 0.75, "full_t_min": 1.65, "eval_ann_return_min": 0.05, "max_dd_max": 0.20, "sharpe_2x_min": 0.4,
+       "placebo_t_max": 1.5, "plateau_sharpe_min": 0.5, "plateau_band": 0.5, "top5_share_max": 0.5, "ref_corr_max": 0.7, "strong_sharpe_both": 1.0}
+# 2026-10-13 (Dominik): a TRIAGE bar for Human Review, not an adoption bar — inclusive on magnitude, strict on fakeness. Sharpe ≥ 0.5 in both
+# windows and ≥ 0.75 in evaluation; significance on the full sample as a t-stat (≥ 1.65, one-sided 95 %; ≈ Sharpe 0.75 over 4.7 years, adapts
+# as the window grows); evaluation annualised net return ≥ 5 %; max DD ≤ 20 % (no governor); 2× costs Sharpe > 0.4; placebo |t| < 1.5; plateau
+# median ≥ 0.5; top-5 ≤ 50 %; NEW diversification line: max |corr| with the three production sleeves ≤ 0.7. STRONG = also Sharpe ≥ 1.0 in both.
 REFERENCE = ["ref_funding_carry.json", "ref_illiquidity.json", "ref_taker_flow.json"]
 
 
@@ -151,33 +156,43 @@ def main():
                     ref_corr[rf] = f"error: {e}"
     # ---------------- bar
     c_, e_, f_ = H["calibration 2022-01 → 2023-12"], H[f"evaluation 2024-01 → {eval_end}"], H["full"]
+    r_full = daily["ret"].dropna(); full_t = float(r_full.mean() / r_full.std() * np.sqrt(len(r_full))) if r_full.std() > 0 else np.nan
+    eval_ann = float(win(daily, "2024-01-01", eval_end)["ret"].mean() * ANN)
+    corr_vals = [abs(v) for v in ref_corr.values() if isinstance(v, float) and np.isfinite(v)]; max_corr = max(corr_vals) if corr_vals else np.nan
     checks = {
-        f"Sharpe ≥ {BAR['sharpe_min_both']} in both windows": (c_["sharpe"] >= BAR["sharpe_min_both"] and e_["sharpe"] >= BAR["sharpe_min_both"], f"calib {c_['sharpe']:+.2f} / eval {e_['sharpe']:+.2f}"),
-        "evaluation return > 0": (e_["return"] > BAR["eval_return_min"], f"{e_['return']:+.1%}"),
-        f"max drawdown ≤ {BAR['max_dd_max']:.0%} (full)": (f_["max_dd"] >= -BAR["max_dd_max"], f"{f_['max_dd']:.1%}"),
+        f"Sharpe ≥ {BAR['sharpe_min_both']} in both windows and ≥ {BAR['sharpe_min_eval']} in evaluation": (c_["sharpe"] >= BAR["sharpe_min_both"] and e_["sharpe"] >= BAR["sharpe_min_eval"], f"calib {c_['sharpe']:+.2f} / eval {e_['sharpe']:+.2f}"),
+        f"full-sample t ≥ {BAR['full_t_min']} (≈ Sharpe {BAR['full_t_min'] / np.sqrt(len(r_full) / ANN):.2f} over {len(r_full) / ANN:.1f} y)": (np.isfinite(full_t) and full_t >= BAR["full_t_min"], f"t {full_t:+.2f}, full Sharpe {f_['sharpe']:+.2f}"),
+        f"evaluation annualised net return ≥ {BAR['eval_ann_return_min']:.0%}": (eval_ann >= BAR["eval_ann_return_min"], f"{eval_ann:+.1%}/yr (cum {e_['return']:+.1%})"),
+        f"max drawdown ≤ {BAR['max_dd_max']:.0%} (full, no governor)": (f_["max_dd"] >= -BAR["max_dd_max"], f"{f_['max_dd']:.1%}"),
         f"Sharpe > {BAR['sharpe_2x_min']} at 2× costs (full)": (s_2x["sharpe"] > BAR["sharpe_2x_min"], f"{s_2x['sharpe']:+.2f}"),
         f"placebo (shuffled names) |t| < {BAR['placebo_t_max']}": (abs(placebo_t) < BAR["placebo_t_max"], f"{placebo_t:+.2f} (3 seeds)"),
         f"parameter plateau: neighbours within ±{BAR['plateau_band']:.0%} keep calib Sharpe ≥ {BAR['plateau_sharpe_min']}": (not np.isfinite(plateau) or plateau >= BAR["plateau_sharpe_min"], f"median {plateau:+.2f}" if np.isfinite(plateau) else "no tunables"),
         f"top-5 names ≤ {BAR['top5_share_max']:.0%} of positive P&L": (np.isfinite(top5) and top5 <= BAR["top5_share_max"], f"{top5:.0%}" if np.isfinite(top5) else "n/a"),
+        f"diversification: max |corr| with the production sleeves ≤ {BAR['ref_corr_max']}": (not np.isfinite(max_corr) or max_corr <= BAR["ref_corr_max"], (f"max |corr| {max_corr:.2f}" if np.isfinite(max_corr) else "reference sleeves not run (--quick)")),
     }
+    strong = bool(c_["sharpe"] >= BAR["strong_sharpe_both"] and e_["sharpe"] >= BAR["strong_sharpe_both"])
     passed = all(v[0] for v in checks.values()); verdict = "PASS" if passed else "FAIL"
     failed = [k for k, v in checks.items() if not v[0]]
     # ---------------- "For Scout": plain-words diagnosis in the fixed vocabulary of TICKET_FORMAT.md (code-computed, no engine numbers)
     ret_yr = float(daily["ret"].mean() * ANN); fs = []
     if (not np.isfinite(c_["sharpe"]) or c_["sharpe"] < 0.5) and (not np.isfinite(e_["sharpe"]) or e_["sharpe"] < 0.5):
         fs.append("no signal in either window — the ranking does not separate winners from losers at this horizon")
-    elif c_["sharpe"] >= 1.0 and (e_["sharpe"] < 0.5 or e_["return"] <= 0):
+    elif c_["sharpe"] >= BAR["sharpe_min_eval"] and (e_["sharpe"] < BAR["sharpe_min_both"] or e_["return"] <= 0):
         fs.append("signal only early — it worked in the calibration years and faded afterwards; the participants who created it may be gone")
-    elif e_["sharpe"] >= 1.0 and c_["sharpe"] < 0.5:
+    elif e_["sharpe"] >= BAR["sharpe_min_eval"] and c_["sharpe"] < BAR["sharpe_min_both"]:
         fs.append("signal only late — absent in the calibration years; one episode or a new participant, not yet a durable mechanism")
     if s_2x["sharpe"] <= BAR["sharpe_2x_min"] or (ret_yr > 0 and cost_yr > 0.5 * ret_yr):
         fs.append("costs eat it — the rebalancing bill is a large share of what the spread earns; the construction trades too often for the size of the effect")
     if fund_yr < 0 and ret_yr > 0 and abs(fund_yr) > 0.5 * ret_yr:
         fs.append("funding eats it — the legs pay more funding than the spread earns; the ranking selects names on the wrong side of the funding sort")
+    if np.isfinite(full_t) and full_t < BAR["full_t_min"] and c_["sharpe"] >= BAR["sharpe_min_both"] and e_["sharpe"] >= BAR["sharpe_min_both"]:
+        fs.append("too weak to be sure — right sign in both windows but the full-sample t-stat is below 1.65; the effect is small relative to its noise")
+    if eval_ann < BAR["eval_ann_return_min"] and e_["sharpe"] > 0:
+        fs.append("too small to matter — positive but under 5 %/yr net in evaluation at the standard sizing")
     if np.isfinite(top5) and top5 > BAR["top5_share_max"]:
         fs.append("concentrated — a handful of names make the money; the effect is not broad across the universe")
     for k, v in ref_corr.items():
-        if isinstance(v, float) and abs(v) >= 0.6:
+        if isinstance(v, float) and abs(v) > BAR["ref_corr_max"]:
             fs.append(f"tracks a known sleeve ({k}) — the ranking largely reproduces an existing construction")
     if np.isfinite(plateau) and plateau < BAR["plateau_sharpe_min"]:
         fs.append("not robust to its parameters — neighbouring settings lose most of the result; the chosen point is a knife edge")
@@ -186,7 +201,7 @@ def main():
     if f_["max_dd"] < -BAR["max_dd_max"]:
         fs.append("drawdown too deep — the construction concentrates risk in time; a smoother selection or a longer horizon class")
     if passed:
-        watch = [f"{y} was negative" for y, v in H.items() if y.isdigit() and np.isfinite(v["return"]) and v["return"] < 0]
+        watch = (["STRONG (Sharpe ≥ 1.0 in both windows)"] if strong else []) + [f"{y} was negative" for y, v in H.items() if y.isdigit() and np.isfinite(v["return"]) and v["return"] < 0]
         watch += [f"correlation {v:+.2f} with the {k} sleeve" for k, v in ref_corr.items() if isinstance(v, float) and abs(v) >= 0.4]
         for_scout = "passed the bar" + ("; watch: " + ", ".join(watch) if watch else "")
     else:
@@ -201,6 +216,7 @@ def main():
           "| window / year | return | Sharpe | Sortino | max DD | worst day | hit rate | days |", "|---|---|---|---|---|---|---|---|"] + [row(k, v) for k, v in H.items()] + [
           f"\nTurnover {turn:.3f} × N/day · cost drag {cost_yr:.2%}/yr · funding P&L {fund_yr:+.2%}/yr · rebalances {n_rebal} · raw sleeve (daily, no caps/hedge) Sharpe {s_raw['sharpe']:+.2f} · worst 1/7/30 d {worst['worst_1d']:+.1%} / {worst['worst_7d']:+.1%} / {worst['worst_30d']:+.1%}",
           "", "**Bar**", ""] + [f"- {'✓' if v[0] else '✗'} {k}: {v[1]}" for k, v in checks.items()] + [
+          "", f"**Strength** {'STRONG — also clears Sharpe ≥ 1.0 in both windows' if strong else 'standard'}" if passed else "",
           "", f"**Sweep** {len(combos)} of {full_size} combinations over {', '.join(keys) if keys else 'no tunables'}; best = " + (", ".join(f"{k.split('.')[-1]}={v}" for k, v in best_ov.items()) if best_ov else "the submitted config") +
           f"; calib Sharpe of the grid: best {sw['sharpe_calib'].max():+.2f}, median {sw['sharpe_calib'].median():+.2f}, worst {sw['sharpe_calib'].min():+.2f}",
           f"**Concentration** top-5 names {top5:.0%} of positive P&L: " + ", ".join(f"{k} {v:+.2%}" for k, v in top5_names.items()) if np.isfinite(top5) else "**Concentration** n/a",
@@ -214,7 +230,7 @@ def main():
     json.dump({"ticket": a.ticket, "round": a.round, "verdict": verdict, "failed": failed, "eval_end": eval_end, "headline": H, "bar": {k: {"pass": bool(v[0]), "value": v[1]} for k, v in checks.items()},
                "sweep": {"keys": keys, "n_run": len(combos), "n_full": full_size, "best": best_ov, "plateau_median_sharpe": plateau, "top10": sw.head(10).to_dict("records")},
                "raw_sleeve": s_raw, "two_x_costs": s_2x, "placebo_t": placebo_t, "placebo_seeds": pl, "top5_share": top5, "top5_names": top5_names, "worst": worst, "reference_corr": ref_corr,
-               "first_traded_day": str(first_pos.date()), "warmup_days_excluded": warmup_days, "turnover_per_day": turn, "cost_drag_per_yr": cost_yr, "funding_per_yr": fund_yr, "n_rebalances": n_rebal, "warnings": warns, "for_scout": for_scout},
+               "first_traded_day": str(first_pos.date()), "warmup_days_excluded": warmup_days, "turnover_per_day": turn, "cost_drag_per_yr": cost_yr, "funding_per_yr": fund_yr, "n_rebalances": n_rebal, "warnings": warns, "for_scout": for_scout, "strong": strong, "full_t": full_t, "eval_ann_return": eval_ann, "max_ref_corr": max_corr, "bar_version": "2026-10-13"},
               open(base + "_result.json", "w"), indent=1, default=lambda x: float(x) if isinstance(x, (np.floating, np.integer)) else str(x))
     json.dump(best, open(base + "_best_config.json", "w"), indent=1, ensure_ascii=False)
     try:
