@@ -36,13 +36,13 @@ Judge never edits a config, never re-runs to change a verdict, never sees the ev
 ## Running it
 ```
 pip install -r requirements.txt
-export AWS_S3_ACCESS_KEY=…  AWS_S3_ACCESS_KEY_SECRET=…        # read-only bucket credentials, by name only
 python3 tools/validate_config.py examples/example_illiquidity_top10.json
-python3 tools/judge_run.py --config examples/example_illiquidity_top10.json --ticket NOS-0 --round 1 --out runs/NOS-0/
+# read-only bucket credentials go inline, by name, on the command that reads the bucket — never `export`ed into the shell
+AWS_S3_ACCESS_KEY=…  AWS_S3_ACCESS_KEY_SECRET=…  python3 tools/judge_run.py --config examples/example_illiquidity_top10.json --ticket NOS-0 --round 1 --out runs/NOS-0/
 # local mirror / synthetic bucket:  --data /path/to/mirror   (or BINANCE_DATA_ROOT)
 python3 tests/test_engine.py                                    # offline, ~1–2 min, builds its own synthetic bucket
 ```
 A full run on the real bucket: data load once (~minutes), ≤ 48 sweep simulations plus ~8 verification runs; 2–4 GB of memory.
 
 ## What must exist outside this repo
-The four Linear statuses in team NoSyntax (**Idea Generated**, **Critiqued**, **Discarded**, **Human Review**); the Linear integration on the agent; the bucket credentials in the agent's environment; Python 3.10+ with pandas, numpy, pyarrow, s3fs. Scout's side is `scout-config`.
+The four Linear statuses in team NoSyntax (**Idea Generated**, **Critiqued**, **Discarded**, **Human Review**); the Linear integration on the agent; the bucket credentials as agent secrets (`AWS_S3_ACCESS_KEY`, `AWS_S3_ACCESS_KEY_SECRET` — passed inline per command, not exported); Python 3.10+ with pandas, numpy, pyarrow, s3fs. Scout's side is `scout-config`.

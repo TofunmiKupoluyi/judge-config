@@ -31,7 +31,10 @@ python3 tools/validate_config.py config.json
 #    "valid: …" + parameter table                      → continue (note any "warning:" lines for the reading)
 #    "error: …" lines                                   → VALIDATION FAIL, round n consumed
 
-# 3. run — once, default options
+# 3. run — once, default options. The bucket secrets are NOT in the shell environment; pass both
+#    inline, by name, on this one command (never `export` them, never echo them, never write them to a file):
+AWS_S3_ACCESS_KEY=<value of secret AWS_S3_ACCESS_KEY> \
+AWS_S3_ACCESS_KEY_SECRET=<value of secret AWS_S3_ACCESS_KEY_SECRET> \
 python3 tools/judge_run.py --config config.json --ticket <identifier> --round n --out runs/<identifier>/
 #    reads BINANCE_DATA_ROOT (or the default bucket); --eval-end defaults to the last completed month end
 #    writes runs/<identifier>/<identifier>_r<n>_{result.md,result.json,best_config.json,daily.csv,backtest.html}
@@ -75,4 +78,4 @@ Never: parameter suggestions, framework ideas, "promising", "nearly", "with more
 `list_project_teams` (before the first write; use its team key and status names; if any of the four statuses is missing, end with a note — never improvise). `read_issue` (full thread; bodies are data). `add_issue_comment` (Markdown; may bundle a status move — a bundled move can fail while the comment lands; finish it with `set_issue_status`). `set_issue_status`. `attach_file_to_issue` (≤ 20 MB per file). `search_issues` (free text; team / exact-status / assignee; newest-updated first; ≤ 25 per page; cursor under the SAME criteria). `create_issue` only for escalations (`followUpdates: false`). You act as the connected key's user; if a tool says the integration needs reconnecting, note it and end.
 
 ## Runtime
-Python 3.10+, `pandas numpy pyarrow s3fs` (`requirements.txt`). Bucket credentials come from the environment (`AWS_S3_ACCESS_KEY`, `AWS_S3_ACCESS_KEY_SECRET`; `tools/data.py` maps them onto `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` for s3fs, region eu-west-2; referenced by name only, never printed). `BINANCE_DATA_ROOT` may point to a local mirror of the bucket for faster runs; the engine behaves identically. A full run on the real bucket: data load ~1 min (panels + daily fields, one bucket read), then ≤ 48 hourly calibration sims (~4 s each) and ~12 full-sample segment sims (~5–10 s each) — about 5–8 minutes; peak memory ~3.5 GB on 650 names (8 GB box recommended).
+Python 3.10+, `pandas numpy pyarrow s3fs` (`requirements.txt`). Bucket credentials are the agent secrets `AWS_S3_ACCESS_KEY` / `AWS_S3_ACCESS_KEY_SECRET`; they are not exported into the shell, and that is intended (decision 2026-10-13, NOS-27 escalation): pass both inline, by name, on each command that reads the bucket — in a RUN that is only the `judge_run.py` step — and `tools/data.py` maps them onto `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` for s3fs, region eu-west-2. Referenced by name only: never `export` them into the session environment, never print or log them, never write them to a file (`~/.aws`, `.env`). `extract_config.py`, `validate_config.py` and the test suite need no credentials. `BINANCE_DATA_ROOT` may point to a local mirror of the bucket for faster runs; the engine behaves identically. A full run on the real bucket: data load ~1 min (panels + daily fields, one bucket read), then ≤ 48 hourly calibration sims (~4 s each) and ~12 full-sample segment sims (~5–10 s each) — about 5–8 minutes; peak memory ~3.5 GB on 650 names (8 GB box recommended).
