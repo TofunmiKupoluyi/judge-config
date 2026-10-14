@@ -1,6 +1,6 @@
 ---
 name: binance-futures-data
-description: Use when you need historical Binance USD-M futures data for backtesting or analysis - candles (1m, 1h, 1d), funding rates, open interest and long/short ratios, and daily taker order-flow dollars by trade size. Explains the S3 bucket layout, schemas, access and pitfalls.
+description: Use when you need historical Binance USD-M futures data for backtesting or analysis - candles (1m, 1h, 1d), funding rates, open interest and long/short ratios, daily taker order-flow dollars by trade size, and a daily high-low spread proxy from 1-minute bars. Explains the S3 bucket layout, schemas, access and pitfalls.
 ---
 
 # Binance USD-M futures data (S3)
@@ -14,6 +14,7 @@ Here:
 - **Funding rates** for every perpetual, one row per settlement, from January 2020.
 - **Metrics** at 5-minute resolution, from September 2020: open interest, plus long/short and taker buy/sell ratios. Also a daily snapshot file.
 - **Taker flow** daily per symbol, from January 2020: taker buy and sell dollars and trade counts split into six trade-size buckets, built from Binance's aggTrades dumps, with net and gross summary columns for the whole day and for the small (under $1k) and large ($100k and over) tails.
+- **Spread proxy** daily per symbol, from January 2020: the mean and median over each UTC day's 1-minute bars of (high − low) / close, with the day's bar count. A liquidity and effective-cost measure derived from the 1m candles in this bucket — at 1-minute resolution the bar range reflects bid-ask bounce and depth far more than the daily range does.
 
 Not here:
 - Spot or COIN-M data. Symbol names such as BTCUSDT match spot names, but everything in this bucket is the futures contract.
@@ -65,6 +66,9 @@ s3://binance-data-546016014952-eu-west-2-an/v1/binance/um/
   taker_flow/
     interval=1d/
       data.parquet                   all symbols, all history: taker $ by trade size, one row per symbol-day
+  hl_spread/
+    interval=1d/
+      data.parquet                   all symbols, all history: daily spread proxy from 1m bars, one row per symbol-day
   meta/
     symbols.parquet                  candle coverage: one row per symbol
     metrics_symbols.parquet          metrics coverage: one row per symbol
@@ -86,6 +90,7 @@ The `key=value` folder names follow the Hive convention. With hive partitioning 
 | Daily open interest or positioning across the universe | `metrics/interval=1d/data.parquet` | under 1M rows |
 | Intraday open interest or ratios for specific symbols | `metrics/interval=5m/symbol=X/year=YYYY/` | a few MB per symbol-year, about 105k rows |
 | Order-flow imbalance, flow by trade size, retail vs large-print activity | `taker_flow/interval=1d/data.parquet` | about 90 MB, under 1M rows |
+| Liquidity / spread-proxy ranking, market-maker-withdrawal signals | `hl_spread/interval=1d/data.parquet` | tens of MB, under 1M rows |
 
 Start with the coarsest file that answers the question. Screen on daily or hourly data, then pull 1m candles or 5m metrics only for the symbols and periods that matter.
 
@@ -163,6 +168,20 @@ A print exactly on a boundary goes to the upper bucket.
 
 "Buy" means the taker was the buyer (aggressive buying); "sell" means the taker was the seller. The six summary columns are exactly sums of the raw bucket columns, so any other split (say, ≥ $10k as "large") can be recomputed from the raw columns without new data. Sorted by `symbol`, then `time`. About 669k rows over 1,049 symbols, from January 2020.
 
+### Spread proxy: hl_spread/interval=1d/data.parquet
+
+One row per symbol per UTC day, computed from the 1m candles in this bucket. For every 1-minute bar of the day, take (high − low) / close; the row holds that day's aggregates.
+
+| Column | Type | Meaning |
+|---|---|---|
+| symbol | string | Contract name |
+| time | timestamp | Start of the UTC day the row aggregates |
+| hl_spread_1m | float64 | Mean of (high − low) / close over the day's 1m bars |
+| hl_spread_1m_median | float64 | Median of the same values |
+| minutes | int32 | How many 1m bars the day had (1,440 when complete) |
+
+Sorted by `symbol`, then `time`. Coverage equals candle coverage (`symbols.parquet`), from January 2020.
+
 ### meta/symbols.parquet (candle coverage)
 
 | Column | Meaning |
@@ -186,10 +205,12 @@ Columns: `symbol`, `first_time`, `last_time`, `rows_5m`. Metrics start later tha
 | funding_through | Last funding settlement in the bucket |
 | metrics_through | Last metrics snapshot in the bucket |
 | flow_through | Last taker-flow day in the bucket (start-of-day stamp) |
+| spread_through | Last spread-proxy day in the bucket (start-of-day stamp) |
 | symbols, symbols_live, rows_1m | Candle totals |
 | funding_symbols, funding_rows | Funding totals |
 | metrics_symbols, metrics_rows_5m | Metrics totals |
 | flow_symbols, flow_rows | Taker-flow totals |
+| spread_symbols, spread_rows | Spread-proxy totals |
 | generated_at | When the manifest was last written |
 
 A `*_through` key is absent if that dataset has not been loaded yet.
@@ -201,6 +222,7 @@ A `*_through` key is absent if that dataset has not been loaded yet.
 | Candles | about a day | Loaded from Binance's daily dump files |
 | Metrics | about a day | Loaded from Binance's daily dump files |
 | Taker flow | about a day | Loaded from Binance's daily dump files |
+| Spread proxy | about a day | Derived from the 1m candles in the same update run |
 | Funding | a few hours | Pulled from the Binance API several times a day |
 
 Always read the manifest rather than assuming. The three datasets end at different times, so clip to the earliest `*_through` when combining them.
@@ -208,7 +230,7 @@ Always read the manifest rather than assuming. The three datasets end at differe
 ## Recommended workflow
 
 1. Read `meta/manifest.json` and note the `*_through` times.
-2. Read `meta/symbols.parquet` (and `metrics_symbols.parquet` if you need metrics) to decide which symbols and years you need. They are tiny. Taker flow has no coverage meta file; get per-symbol coverage from the data file itself — it is small enough to query directly.
+2. Read `meta/symbols.parquet` (and `metrics_symbols.parquet` if you need metrics) to decide which symbols and years you need. They are tiny. Taker flow and the spread proxy have no coverage meta file; the spread proxy's coverage equals candle coverage, and taker-flow coverage comes from the data file itself — it is small enough to query directly.
 3. Build explicit file paths from that, and read only the columns you need.
 4. Process large 1m or 5m pulls one symbol at a time.
 
@@ -297,6 +319,13 @@ flow = con.execute(f"""
     WHERE time >= '2025-01-01'
 """).df()
 
+# Daily spread proxy, keeping only days with decent bar coverage
+spread = con.execute(f"""
+    SELECT symbol, time, hl_spread_1m, hl_spread_1m_median, minutes
+    FROM read_parquet('{ROOT}/hl_spread/interval=1d/data.parquet')
+    WHERE time >= '2025-01-01' AND minutes >= 1000
+""").df()
+
 # Attach to each hourly bar the latest funding rate known at that time
 joined = con.execute(f"""
     SELECT k.time, k.close, f.funding_rate, f.time AS funding_time
@@ -362,6 +391,12 @@ Taker flow:
 - **Print size is not order size.** A large order split into many fills at different prices (or sliced by an algo) shows up as several smaller prints, so the large buckets undercount true large-order activity and the small buckets contain slices of big orders, not only retail.
 - **Buy and sell are taker-side labels.** Every trade has a buyer and a seller; these columns say which side was the aggressor. Buys and sells here never cancel against each other except in the `net` columns.
 - **Missing rows and zero rows differ.** A row of zeros means the day was loaded and had no trades. A missing (symbol, day) row means the day was not loaded — treat it as a gap, not as zero flow.
+
+Spread proxy:
+- **A row looks ahead if misused.** A row stamped 2025-03-01 aggregates that whole UTC day, so it is only known after the day closes. Pair it with the next day's decisions, exactly as you would a daily close.
+- **Zero means thin, not tight.** A minute in which at most one price traded has high = low and contributes 0. In thin names most minutes are like that, so the median is often exactly 0 and the mean is pulled down. Read a low value together with `minutes` and the mean/median pair before calling a market tight; a liquid market shows a small positive spread, a dead one shows zero.
+- **Missing minutes are absent, not zero.** The statistics cover only the bars that exist. `minutes` below 1,440 means gaps (listing day, halts, outages); filter on it when day-to-day comparability matters.
+- **It is a traded-price proxy, not a quoted spread.** There is no order-book data in the bucket. The 1-minute range mixes bid-ask bounce, depth and some genuine volatility; it tracks effective cost, not the top-of-book quote.
 
 Metrics:
 - **The daily file looks ahead if misused.** A row stamped 2025-03-01 holds the snapshot from the end of that day. It is only known after the day closes, so pair it with the next day's decisions, exactly as you would a daily close.

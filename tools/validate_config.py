@@ -21,7 +21,7 @@ SCHEMA = os.path.join(HERE, "..", "reference", "TRADE_CONFIG_SCHEMA.json")
 
 # the data fields the engine exposes (daily, point-in-time; see the trade-config-spec skill) — keep in sync with tools/data.py
 FIELDS = {
- "close", "ret", "log_ret", "resid_ret", "high", "low", "range_pct", "volume_usd", "taker_buy_usd", "taker_sell_usd", "taker_imbalance",
+ "close", "ret", "log_ret", "resid_ret", "high", "low", "range_pct", "hl_spread_1m", "hl_spread_1m_median", "volume_usd", "taker_buy_usd", "taker_sell_usd", "taker_imbalance",
  "n_trades", "funding", "funding_3d", "mdv21", "adv7", "oi_usd", "oi_change_1d", "ls_ratio_acct", "ls_ratio_top_acct", "ls_ratio_top_pos", "taker_ls_vol",
  "btc_ret", "age_days", "amihud21", "vol30", "mcap"
 }

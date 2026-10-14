@@ -9,6 +9,9 @@ Fields (keep in sync with tools/validate_config.py FIELDS and the trade-config-s
   ret            simple return close_t / close_{t-1} − 1     log_ret   ln(close_t / close_{t-1})
   resid_ret      ret − beta60d × btc_ret  (BTC-residual simple return; beta from hourly returns, lagged)       btc_ret  BTC's ret
   high, low      day t−1's high / low;  range_pct = (high − low) / close_{t−1}
+  hl_spread_1m   day t−1's mean over its 1-minute bars of (high − low) / close, from the bucket's hl_spread dataset
+                 (a spread/liquidity proxy; NaN until that dataset is backfilled);  hl_spread_1m_median = the median,
+                 exactly 0 on days where most minutes traded at a single price (thin names)
   volume_usd     day t−1's quote volume; taker_buy_usd, taker_sell_usd, taker_imbalance = (buy − sell) / volume
   n_trades       day t−1's trade count
   funding        funding paid by a LONG during day t−1 (sum of prints; sign: positive = longs paid)  funding_3d = 3-day sum
@@ -138,6 +141,18 @@ class Data:
             log(f"data: metrics unavailable ({e})")
             for dst in ("oi_usd", "oi_change_1d", "ls_ratio_acct", "ls_ratio_top_acct", "ls_ratio_top_pos", "taker_ls_vol"):
                 F[dst] = pd.DataFrame(np.nan, index=self.dates, columns=self.symbols)
+        log("data: hl_spread")
+        try:
+            hs = _read(f"{self.root}/hl_spread/interval=1d/data.parquet")
+            hs["time"] = pd.to_datetime(hs["time"], utc=True) + pd.Timedelta(days=1)       # day D's statistics are known at D+1 00:00
+            hs = hs[hs["symbol"].isin(self.symbols)]
+            for col in ("hl_spread_1m", "hl_spread_1m_median"):                            # 0.0 is a real value (thin names), keep it
+                F[col] = hs.pivot(index="time", columns="symbol", values=col).reindex(index=self.dates, columns=self.symbols).ffill(limit=2)
+            del hs
+        except Exception as e:  # noqa: BLE001
+            log(f"data: hl_spread unavailable ({e})")
+            for col in ("hl_spread_1m", "hl_spread_1m_median"):
+                F[col] = pd.DataFrame(np.nan, index=self.dates, columns=self.symbols)
         F["mcap"] = pd.DataFrame(np.nan, index=self.dates, columns=self.symbols)
         self.F = {k: v.reindex(index=self.dates, columns=self.symbols).astype("float64") for k, v in F.items()}
         self.last_valid = last; self.hourly_close = close_h if panels is None else None; self.hourly_end = close_h.index[-1]
