@@ -118,7 +118,13 @@ def main():
         c = json.load(open(cfg)); t = "## Trade config\n```json\n" + json.dumps(c) + "\n```\n"
         t2 = t + "\n[JUDGE RESULT 1/5 — FAIL]\n```json\n{\"x\": 1}\n```\n\n[SCOUT FRAMEWORK 2/5]\n```json\n" + json.dumps(dict(c, framework="second")) + "\n```\n"
         t3 = t2 + "\n[JUDGE RESULT 2/5 — PASS]\n"
-        for i, (txt, want_rc, want_round, want_fw) in enumerate(((t, 0, 1, c["framework"]), (t2, 0, 2, "second"), (t3, 3, None, None))):
+        # NOS-66: headings quoted inside a post (prose backticks, the config's notes string) are not post
+        # boundaries, and a real heading may arrive with Linear's markdown escaping (\[ \])
+        c2 = dict(c, framework="third", notes="an earlier duplicate '[SCOUT FRAMEWORK 2/5]' was posted")
+        t4 = (t2 + "\n[JUDGE RESULT 2/5 — FAIL]\nx\n\n\\[SCOUT FRAMEWORK 3/5\\]\n"
+              "Answers `[JUDGE RESULT 2/5 — FAIL]`; note a duplicate `[SCOUT FRAMEWORK 2/5]` from another session.\n\n"
+              "## Trade config\n```json\n" + json.dumps(c2) + "\n```\n")
+        for i, (txt, want_rc, want_round, want_fw) in enumerate(((t, 0, 1, c["framework"]), (t2, 0, 2, "second"), (t3, 3, None, None), (t4, 0, 3, "third"))):
             p = os.path.join(tmp, f"th{i}.md"); open(p, "w").write(txt); o = os.path.join(tmp, f"c{i}.json")
             r = run([os.path.join(TOOLS, "extract_config.py"), p, "--out", o, "--ticket", "NOS-1"])
             good = r.returncode == want_rc and (want_rc != 0 or (json.load(open(o))["round"] == want_round and json.load(open(o))["framework"] == want_fw))

@@ -10,6 +10,8 @@ Rules (reference/TICKET_FORMAT.md): the config to test is the LAST ```json block
 when there is no `[SCOUT FRAMEWORK` comment, else the newest such comment. The round to run = (number of `[JUDGE RESULT`
 headings in the thread) + 1. If a `[JUDGE RESULT <n>/5` heading already exists for that round, exit 3 (nothing to do:
 idempotent re-trigger). Exit 2 when no JSON block is found or it does not parse — then Judge posts the validation note.
+A heading is recognised only as a whole line on its own; a heading quoted mid-line inside a post (prose backticks, a
+config's notes string) is not a post boundary.
 """
 from __future__ import annotations
 
@@ -19,8 +21,11 @@ import re
 import sys
 
 FENCE = re.compile(r"```json\s*(.*?)```", re.S)
-SCOUT = re.compile(r"\[SCOUT FRAMEWORK\s*(\d+)\s*/\s*5\]")
-JUDGE = re.compile(r"\[JUDGE RESULT\s*(\d+)\s*/\s*5\s*[—-]\s*(PASS|FAIL)\]")
+# A heading counts only when it is a whole line on its own (TICKET_FORMAT), so a heading QUOTED
+# inside a post — in prose backticks or a config's notes string — sits mid-line and never matches.
+# Linear thread dumps may escape the brackets as \[ \].
+SCOUT = re.compile(r"^\s*\\?\[SCOUT FRAMEWORK\s*(\d+)\s*/\s*5\\?\]\s*$", re.M)
+JUDGE = re.compile(r"^\s*\\?\[JUDGE RESULT\s*(\d+)\s*/\s*5\s*[—-]\s*(PASS|FAIL)\\?\]\s*$", re.M)
 
 
 def extract(text):
