@@ -46,6 +46,15 @@ add_issue_comment <identifier>  body = <identifier>_r<n>_result.md verbatim
                                 bundle the status move: PASS → Human Review; FAIL → Critiqued (n<5) | Discarded (n=5)
 attach_file_to_issue  _backtest.html, _result.json, _best_config.json  (+ _daily.csv if < 20 MB)
 set_issue_status      only if the bundled move failed (the tool reports it)
+
+# 5. outcome — only on PASS (Human Review) or Discarded at round 5; nothing on Critiqued
+cat > outcome.json <<'JSON'
+{"status": "PASSED or DISCARDED", "finding": "<one line from the posted result: verdict, binding bar line, headline numbers with windows>"}
+JSON
+curl -sS -X PATCH -H "Authorization: Bearer <value of secret RESEARCH_API_KEY>" \
+  -H 'Content-Type: application/json' -d @outcome.json \
+  https://research.nosyntax.ai/research/v1/ideas/<identifier>
+#    404 = Scout never filed the idea: one line in-thread, do not create it. Calls: reference/RESEARCH_API.md
 ```
 One ticket per run; one run per round; never a second `judge_run.py` invocation for the same round unless the first crashed (then say so in the comment, with the error). Never pass `--quick`, `--max-grid`, `--start` or `--eval-end` to change an outcome; `--quick` is acceptable only when the reference-sleeve runs themselves error, and must be stated.
 

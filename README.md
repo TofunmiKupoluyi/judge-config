@@ -45,4 +45,4 @@ python3 tests/test_engine.py                                    # offline, ~1–
 A full run on the real bucket: data load once (~minutes), ≤ 48 sweep simulations plus ~8 verification runs; 2–4 GB of memory.
 
 ## What must exist outside this repo
-The four Linear statuses in team NoSyntax (**Idea Generated**, **Critiqued**, **Discarded**, **Human Review**); the Linear integration on the agent; the bucket credentials as agent secrets (`AWS_S3_ACCESS_KEY`, `AWS_S3_ACCESS_KEY_SECRET` — passed inline per command, not exported); Python 3.10+ with pandas, numpy, pyarrow, s3fs. Scout's side is `scout-config`.
+The four Linear statuses in team NoSyntax (**Idea Generated**, **Critiqued**, **Discarded**, **Human Review**); the Linear integration on the agent; the bucket credentials as agent secrets (`AWS_S3_ACCESS_KEY`, `AWS_S3_ACCESS_KEY_SECRET` — passed inline per command, not exported); `RESEARCH_API_KEY`, a DESK key for the research API (`reference/RESEARCH_API.md`), used only to record an idea's outcome; Python 3.10+ with pandas, numpy, pyarrow, s3fs. Scout's side is `scout-config`.
