@@ -1,5 +1,8 @@
 # Changelog
 
+## 2026-11-03 — trade-size taker flow fields (NOS-102)
+- Six daily fields from the bucket's `taker_flow` dataset (aggTrades): `taker_net_usd`, `taker_gross_usd` (all prints), `taker_net_small_usd`, `taker_gross_small_usd` (prints under $1k), `taker_net_large_usd`, `taker_gross_large_usd` (prints of $100k and over). Day t−1's dollars stamped at t, never forward-filled (NaN on a missing day). `tools/data.py` serves them, `validate_config.py` accepts them, the `engine-and-bar` skill lists them.
+
 ## 2026-11-03 — record the idea's outcome
 - Each experiment is also an idea in the research API (`alpha_research`, `reference/RESEARCH_API.md`), filed by Scout with the paper claims it is grounded in. When Judge's move ends an experiment (PASS → Human Review, or Discarded at round 5) Judge records the status and a one-line finding there (`AGENTS.md` §4 step 6, `research-judge` step 5). New agent secret `RESEARCH_API_KEY` (DESK key).
 - `TICKET_FORMAT.md` synced from scout-config: the rationale cites claims and related ideas instead of an idea-map cell.

@@ -13,6 +13,10 @@ Fields (keep in sync with tools/validate_config.py FIELDS and the trade-config-s
                  (a spread/liquidity proxy; NaN until that dataset is backfilled);  hl_spread_1m_median = the median,
                  exactly 0 on days where most minutes traded at a single price (thin names)
   volume_usd     day t−1's quote volume; taker_buy_usd, taker_sell_usd, taker_imbalance = (buy − sell) / volume
+  taker_net_usd, taker_gross_usd   day t−1's taker buy − sell / buy + sell dollars over all prints, from the bucket's
+                 taker_flow dataset (aggTrades); *_small_usd = prints under $1k, *_large_usd = prints of $100k and over.
+                 A print is one taker order at one price, not a parent order: sliced institutional flow lands in the
+                 small and mid buckets. NaN on a day the dataset lacks (no forward-fill: flow is not a level)
   n_trades       day t−1's trade count
   funding        funding paid by a LONG during day t−1 (sum of prints; sign: positive = longs paid)  funding_3d = 3-day sum
   mdv21          21-day median daily $ volume;  adv7 = 7-day mean $ volume;  amihud21 = 21d mean(|ret| / volume_usd)
@@ -47,6 +51,9 @@ def _aws_env():
 
 def log(*a):
     print(time.strftime("%H:%M:%S"), *a, flush=True)
+
+
+TAKER_FLOW_FIELDS = ("taker_net_usd", "taker_gross_usd", "taker_net_small_usd", "taker_gross_small_usd", "taker_net_large_usd", "taker_gross_large_usd")
 
 
 def _read(path, columns=None):
@@ -152,6 +159,18 @@ class Data:
         except Exception as e:  # noqa: BLE001
             log(f"data: hl_spread unavailable ({e})")
             for col in ("hl_spread_1m", "hl_spread_1m_median"):
+                F[col] = pd.DataFrame(np.nan, index=self.dates, columns=self.symbols)
+        log("data: taker_flow")
+        try:
+            tf = _read(f"{self.root}/taker_flow/interval=1d/data.parquet", columns=["symbol", "time", *TAKER_FLOW_FIELDS])
+            tf["time"] = pd.to_datetime(tf["time"], utc=True) + pd.Timedelta(days=1)       # day D's flow is known at D+1 00:00
+            tf = tf[tf["symbol"].isin(self.symbols)]
+            for col in TAKER_FLOW_FIELDS:
+                F[col] = tf.pivot(index="time", columns="symbol", values=col).reindex(index=self.dates, columns=self.symbols)
+            del tf
+        except Exception as e:  # noqa: BLE001
+            log(f"data: taker_flow unavailable ({e})")
+            for col in TAKER_FLOW_FIELDS:
                 F[col] = pd.DataFrame(np.nan, index=self.dates, columns=self.symbols)
         F["mcap"] = pd.DataFrame(np.nan, index=self.dates, columns=self.symbols)
         self.F = {k: v.reindex(index=self.dates, columns=self.symbols).astype("float64") for k, v in F.items()}
