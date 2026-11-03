@@ -1,5 +1,8 @@
 # Changelog
 
+## 2026-11-03 — session id on every research write
+- Every POST/PUT/PATCH to the research API sends `X-Session-Id: <your session id>` (from the system prompt); a write without it is a 400. The store records it as provenance (who filed or closed an idea, who requested or resolved a data source, who indexed a paper), so each row links back to its run.
+
 ## 2026-11-03 — trade-size taker flow fields (NOS-102)
 - Six daily fields from the bucket's `taker_flow` dataset (aggTrades): `taker_net_usd`, `taker_gross_usd` (all prints), `taker_net_small_usd`, `taker_gross_small_usd` (prints under $1k), `taker_net_large_usd`, `taker_gross_large_usd` (prints of $100k and over). Day t−1's dollars stamped at t, never forward-filled (NaN on a missing day). `tools/data.py` serves them, `validate_config.py` accepts them, the `engine-and-bar` skill lists them.
 

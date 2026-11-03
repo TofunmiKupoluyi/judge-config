@@ -52,7 +52,7 @@ cat > outcome.json <<'JSON'
 {"status": "PASSED or DISCARDED", "finding": "<one line from the posted result: verdict, binding bar line, headline numbers with windows>"}
 JSON
 curl -sS -X PATCH -H "Authorization: Bearer <value of secret RESEARCH_API_KEY>" \
-  -H 'Content-Type: application/json' -d @outcome.json \
+  -H "X-Session-Id: <your session id>" -H 'Content-Type: application/json' -d @outcome.json \
   https://research.nosyntax.ai/research/v1/ideas/<identifier>
 #    404 = Scout never filed the idea: one line in-thread, do not create it. Calls: reference/RESEARCH_API.md
 ```

@@ -16,7 +16,7 @@ curl -sS -H "Authorization: Bearer <value of secret RESEARCH_API_KEY>" \
   "https://research.nosyntax.ai/research/v1/claims?grounded=false&testable=true&limit=30"
 ```
 
-Writes send `-H 'Content-Type: application/json' -d @body.json`. Errors are problem-details JSON with a `detail` line: 400 a bad field (the detail names it), 404 no such row, 409 a conflict (stale lease, existing id). Lists take `limit` (default 50, max 200) and `offset`. Full-text `q` takes web-search syntax: words, `"exact phrase"`, `or`, `-excluded`.
+**Every write** (any POST, PUT or PATCH) also sends `-H "X-Session-Id: <your session id>"` — the id your system prompt gives you ("Your session id is …"), so each row links back to the run that wrote it. A write without it is a 400. Writes send `-H 'Content-Type: application/json' -d @body.json`. Errors are problem-details JSON with a `detail` line: 400 a bad field (the detail names it), 404 no such row, 409 a conflict (stale lease, existing id). Lists take `limit` (default 50, max 200) and `offset`. Full-text `q` takes web-search syntax: words, `"exact phrase"`, `or`, `-excluded`.
 
 What each key may do: the **INDEXER** key reads everything and writes sources (and through them claims and new REQUESTED data sources). A **DESK** key (Scout, Judge) reads everything and writes ideas and data sources. Neither can mint keys.
 
@@ -25,9 +25,9 @@ What each key may do: the **INDEXER** key reads everything and writes sources (a
 |---|---|
 | `GET /claims?grounded=&testable=&q=` | Claims with `statement`, `evidence`, `pageRef`, `sourceTitle`, `sourceYear`, `dataSourceIds`, `testable`, `grounded` and the `ideaIssues` they ground. Default order: ungrounded first, then testable, then newest — so `grounded=false&testable=true` is **the frontier**: what the literature says that no idea has picked up. With `q`, ordered by match. |
 | `GET /claims/{id}` | One claim with its paper (title, authors, year, kind), its data sources in full, and the ideas it grounds. |
-| `GET /ideas?status=&q=` | Ideas with `issue`, `hypothesis`, `status`, `finding`, `claimCount`, `paperCount`. `q` matches the idea's hypothesis and finding **and its claims' text**, across every status unless `status` is given. Newest first, or by match. |
+| `GET /ideas?status=&q=` | Ideas with `issue`, `hypothesis`, `status`, `finding`, `claimCount`, `paperCount`, and the sessions that filed and closed them (`createdBySessionId`, `closedBySessionId`). `q` matches the idea's hypothesis and finding **and its claims' text**, across every status unless `status` is given. Newest first, or by match. |
 | `GET /ideas/{issue}` | One idea, its claims in full, and its related ideas (sharing a claim) with the number shared. |
-| `GET /data-sources?status=` | Every data source with `claimCount`, `paperCount`, `inFlightIdeaCount`. `status=REQUESTED` is the collection backlog, ranked by distinct papers needing it, then in-flight ideas. |
+| `GET /data-sources?status=` | Every data source with `claimCount`, `paperCount`, `inFlightIdeaCount`, and the sessions that requested and resolved it (`requestedBySessionId`, `resolvedBySessionId`). `status=REQUESTED` is the collection backlog, ranked by distinct papers needing it, then in-flight ideas. |
 | `GET /sources?state=&kind=` | Indexing progress: papers and their state (`PENDING` / `LEASED` / `INDEXED` / `FAILED`). |
 
 ## Writing (DESK)
