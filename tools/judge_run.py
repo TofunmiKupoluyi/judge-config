@@ -34,6 +34,9 @@ ANN = 365
 CALIB = ("2022-01-01", "2023-12-31")
 BAR = {"sharpe_min_both": 0.5, "sharpe_min_eval": 0.75, "full_t_min": 1.65, "eval_ann_return_min": 0.05, "max_dd_max": 0.20, "sharpe_2x_min": 0.4,
        "placebo_t_max": 1.5, "plateau_sharpe_min": 0.5, "plateau_band": 0.5, "top5_share_max": 0.5, "ref_corr_max": 0.7, "strong_sharpe_both": 1.0}
+# 2026-11-04b (NOS-44): the placebo relabels the ranking within each row's ranked eligible names (engine.relabel) instead of permuting
+# whole symbol columns — the permutation changed the book's shape and the risk framework bled on that shape, whatever the ranking — and
+# the plateau runs the chosen point's neighbours when the grid sample holds none, instead of scoring the chosen point's own Sharpe.
 # 2026-11-04: the placebo runs are scored gross of costs (cost_mult 0) — shuffled names trading a high-turnover book lose its fees
 # reliably, and that negative t is not the "construction earns it" fakeness the line exists for (it failed every hourly config).
 # 2026-10-13 (Dominik): a TRIAGE bar for Human Review, not an adoption bar — inclusive on magnitude, strict on fakeness. Sharpe ≥ 0.5 in both
@@ -84,6 +87,28 @@ def grid_from(cfg, max_grid, seed=11):
     return keys, combos, len(list(itertools.product(*[axes[k] for k in keys])) if keys else [()])
 
 
+def is_int_param(cfg, key):
+    p = cfg["params"][key.split(".", 1)[1]]; return bool(p.get("integer") or p.get("unit") in ("days", "hours", "count"))
+
+
+def plateau_neighbours(cfg, keys, best_ov, sampled):
+    """Bar line 7 when the sample holds no neighbour: the chosen point's in-range neighbours, ±25 % and ±50 % on each swept numeric
+    parameter one axis at a time (chosen alternatives held), clipped to the declared range, rounded for integer parameters, minus
+    the chosen value and anything already in the sample. Returns override dicts in the sweep's shape."""
+    out = []
+    for k in keys:
+        if not k.startswith("params."):
+            continue
+        p = cfg["params"][k.split(".", 1)[1]]; lo, hi = p["range"]; b = float(best_ov[k])
+        for f in (0.75, 1.25, 0.5, 1.5):
+            v = min(max(b * f, lo), hi); v = int(round(v)) if is_int_param(cfg, k) else round(float(v), 6)
+            ov = dict(best_ov); ov[k] = v; key = tuple(ov[x] for x in keys)
+            if v == b or key in sampled or any(tuple(o[x] for x in keys) == key for o in out):
+                continue
+            out.append(ov)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--config", required=True); ap.add_argument("--ticket", required=True); ap.add_argument("--round", type=int, default=1)
     ap.add_argument("--out", required=True); ap.add_argument("--data", default=os.environ.get("BINANCE_DATA_ROOT", "s3://binance-data-546016014952-eu-west-2-an/v1/binance/um"))
@@ -109,9 +134,10 @@ def main():
     sw = pd.DataFrame(rows); sw = sw.sort_values("sharpe_calib", ascending=False).reset_index(drop=True)
     best_ov = {k: sw.iloc[0][k] for k in keys}; best_ov = {k: (int(v) if isinstance(v, (np.integer,)) or (isinstance(v, float) and float(v).is_integer() and k.startswith("params.") and (cfg["params"][k.split(".", 1)[1]].get("integer") or cfg["params"][k.split(".", 1)[1]].get("unit") in ("days", "hours", "count"))) else (v.item() if hasattr(v, "item") else v)) for k, v in best_ov.items()}
     best = E.with_params(cfg, best_ov); best["experiment"] = a.ticket; best["round"] = a.round
-    # plateau: neighbours whose every swept param is within ±band of the best's value
-    plateau = np.nan
-    if keys:
+    # plateau: grid points whose every swept param is within ±band of the best's value (alternatives equal); when the sample holds
+    # fewer than two such points the chosen point's neighbours are run now (never the chosen point's own Sharpe alone, 2026-11-04b)
+    plateau = np.nan; nbd = pd.DataFrame(); nb = pd.DataFrame()
+    if any(k.startswith("params.") for k in keys):
         def near(row):
             for k in keys:
                 if k.startswith("params."):
@@ -121,7 +147,16 @@ def main():
                 elif row[k] != best_ov[k]:
                     return False
             return True
-        nb = sw[sw.apply(near, axis=1)]; plateau = float(nb["sharpe_calib"].median()) if len(nb) > 1 else float(sw.iloc[0]["sharpe_calib"])
+        nb = sw[sw.apply(near, axis=1)]
+        if len(nb) < 2:
+            extra = plateau_neighbours(cfg, keys, best_ov, {tuple(r[k] for k in keys) for r in rows})
+            log(f"plateau: {len(nb)} sampled point(s) within ±{BAR['plateau_band']:.0%} of the chosen one — running {len(extra)} neighbour(s) on calibration")
+            nrows = []
+            for ov in extra:
+                d, _, _ = E.run_hourly(E.with_params(cfg, ov), data, P, window=CALIB); d = d[d["gross"].cummax() > 0]
+                nrows.append({**ov, "sharpe_calib": stats(d["ret"])["sharpe"]})
+            nbd = pd.DataFrame(nrows); nb = pd.concat([nb, nbd[nbd.apply(near, axis=1)]]) if len(nbd) else nb
+        plateau = float(nb["sharpe_calib"].median()) if len(nb) > 1 else np.nan
     # ---------------- the chosen config on the full sample (calib + eval), risk framework
     log("best config: full sample under the risk framework")
     EVAL = ("2024-01-01", eval_end)
@@ -167,8 +202,8 @@ def main():
         f"evaluation annualised net return ≥ {BAR['eval_ann_return_min']:.0%}": (eval_ann >= BAR["eval_ann_return_min"], f"{eval_ann:+.1%}/yr (cum {e_['return']:+.1%})"),
         f"max drawdown ≤ {BAR['max_dd_max']:.0%} (full, no governor)": (f_["max_dd"] >= -BAR["max_dd_max"], f"{f_['max_dd']:.1%}"),
         f"Sharpe > {BAR['sharpe_2x_min']} at 2× costs (full)": (s_2x["sharpe"] > BAR["sharpe_2x_min"], f"{s_2x['sharpe']:+.2f}"),
-        f"placebo (shuffled names, gross of costs) |t| < {BAR['placebo_t_max']}": (abs(placebo_t) < BAR["placebo_t_max"], f"{placebo_t:+.2f} (3 seeds)"),
-        f"parameter plateau: neighbours within ±{BAR['plateau_band']:.0%} keep calib Sharpe ≥ {BAR['plateau_sharpe_min']}": (not np.isfinite(plateau) or plateau >= BAR["plateau_sharpe_min"], f"median {plateau:+.2f}" if np.isfinite(plateau) else "no tunables"),
+        f"placebo (relabelled ranking, gross of costs) |t| < {BAR['placebo_t_max']}": (abs(placebo_t) < BAR["placebo_t_max"], f"{placebo_t:+.2f} (3 seeds)"),
+        f"parameter plateau: neighbours within ±{BAR['plateau_band']:.0%} keep calib Sharpe ≥ {BAR['plateau_sharpe_min']}": (not np.isfinite(plateau) or plateau >= BAR["plateau_sharpe_min"], (f"median {plateau:+.2f} over {len(nb)} points" + (f", {len(nbd)} run after the sweep" if len(nbd) else "")) if np.isfinite(plateau) else ("no numeric tunables" if not any(k.startswith("params.") for k in keys) else "no neighbour inside the declared range")),
         f"top-5 names ≤ {BAR['top5_share_max']:.0%} of positive P&L": (np.isfinite(top5) and top5 <= BAR["top5_share_max"], f"{top5:.0%}" if np.isfinite(top5) else "n/a"),
         f"diversification: max |corr| with the production sleeves ≤ {BAR['ref_corr_max']}": (not np.isfinite(max_corr) or max_corr <= BAR["ref_corr_max"], (f"max |corr| {max_corr:.2f}" if np.isfinite(max_corr) else "reference sleeves not run (--quick)")),
     }
@@ -198,8 +233,10 @@ def main():
             fs.append(f"tracks a known sleeve ({k}) — the ranking largely reproduces an existing construction")
     if np.isfinite(plateau) and plateau < BAR["plateau_sharpe_min"]:
         fs.append("not robust to its parameters — neighbouring settings lose most of the result; the chosen point is a knife edge")
-    if abs(placebo_t) >= BAR["placebo_t_max"]:
+    if placebo_t >= BAR["placebo_t_max"]:
         fs.append("fails the placebo — randomly relabelled names do about as well; the observable reacts to returns rather than predicting them")
+    elif placebo_t <= -BAR["placebo_t_max"]:
+        fs.append("placebo control off — randomly relabelled books of the same shape lose through the risk framework, so the control cannot vouch for the ranking either way; this is the construction, not the proposal: escalate")
     if f_["max_dd"] < -BAR["max_dd_max"]:
         fs.append("drawdown too deep — the construction concentrates risk in time; a smoother selection or a longer horizon class")
     if passed:
@@ -213,6 +250,8 @@ def main():
         if not np.isfinite(v.get("sharpe", np.nan)):
             return f"| {k} | — | — | — | — | — | — | {v['days']} |"
         return f"| {k} | {v['return']:+.1%} | {v['sharpe']:+.2f} | {v['sortino']:+.2f} | {v['max_dd']:.1%} | {v['worst_day']:+.2%} | {v['hit']:.0%} | {v['days']} |"
+    nb_txt = ("; plateau neighbours run after the sweep (none sampled within ±50 %): " + ", ".join(
+        "/".join(f"{k.split('.')[-1]}={r[k]}" for k in keys if k.startswith("params.")) + f" {r['sharpe_calib']:+.2f}" for r in nbd.to_dict("records"))) if len(nbd) else ""
     md = [f"[JUDGE RESULT {a.round}/5 — {verdict}]", f"**{a.ticket} — {cfg['hypothesis']}**", f"Framework {a.round}: {cfg['framework'][:220]}{'…' if len(cfg['framework']) > 220 else ''}", "",
           "**Headline** (best config of the sweep, selected on calibration only; Obsidian production-replica engine, hourly: caps, max-loss tiers, GMV cap, no-trade band, participation cap, BTC hedge, full cost model, per-print funding; no drawdown governor)" + (f"  · first traded day {first_pos.date()} ({warmup_days} warm-up days excluded)" if warmup_days else ""), "",
           "| window / year | return | Sharpe | Sortino | max DD | worst day | hit rate | days |", "|---|---|---|---|---|---|---|---|"] + [row(k, v) for k, v in H.items()] + [
@@ -220,7 +259,8 @@ def main():
           "", "**Bar**", ""] + [f"- {'✓' if v[0] else '✗'} {k}: {v[1]}" for k, v in checks.items()] + [
           "", f"**Strength** {'STRONG — also clears Sharpe ≥ 1.0 in both windows' if strong else 'standard'}" if passed else "",
           "", f"**Sweep** {len(combos)} of {full_size} combinations over {', '.join(keys) if keys else 'no tunables'}; best = " + (", ".join(f"{k.split('.')[-1]}={v}" for k, v in best_ov.items()) if best_ov else "the submitted config") +
-          f"; calib Sharpe of the grid: best {sw['sharpe_calib'].max():+.2f}, median {sw['sharpe_calib'].median():+.2f}, worst {sw['sharpe_calib'].min():+.2f}",
+          f"; calib Sharpe of the grid: best {sw['sharpe_calib'].max():+.2f}, median {sw['sharpe_calib'].median():+.2f}, worst {sw['sharpe_calib'].min():+.2f}"
+          + nb_txt,
           f"**Concentration** top-5 names {top5:.0%} of positive P&L: " + ", ".join(f"{k} {v:+.2%}" for k, v in top5_names.items()) if np.isfinite(top5) else "**Concentration** n/a",
           ("**Redundancy** daily-return correlation with reference sleeves: " + ", ".join(f"{k} {v:+.2f}" if isinstance(v, float) else f"{k} {v}" for k, v in ref_corr.items())) if ref_corr else "",
           "", f"**For Scout** {for_scout}",
@@ -230,9 +270,9 @@ def main():
     base = os.path.join(a.out, tag)
     open(base + "_result.md", "w", encoding="utf-8").write(md + "\n"); daily.to_csv(base + "_daily.csv")
     json.dump({"ticket": a.ticket, "round": a.round, "verdict": verdict, "failed": failed, "eval_end": eval_end, "headline": H, "bar": {k: {"pass": bool(v[0]), "value": v[1]} for k, v in checks.items()},
-               "sweep": {"keys": keys, "n_run": len(combos), "n_full": full_size, "best": best_ov, "plateau_median_sharpe": plateau, "top10": sw.head(10).to_dict("records")},
+               "sweep": {"keys": keys, "n_run": len(combos), "n_full": full_size, "best": best_ov, "plateau_median_sharpe": plateau, "plateau_points": int(len(nb)), "plateau_neighbours": nbd.to_dict("records"), "top10": sw.head(10).to_dict("records")},
                "raw_sleeve": s_raw, "two_x_costs": s_2x, "placebo_t": placebo_t, "placebo_seeds": pl, "top5_share": top5, "top5_names": top5_names, "worst": worst, "reference_corr": ref_corr,
-               "first_traded_day": str(first_pos.date()), "warmup_days_excluded": warmup_days, "turnover_per_day": turn, "cost_drag_per_yr": cost_yr, "funding_per_yr": fund_yr, "n_rebalances": n_rebal, "warnings": warns, "for_scout": for_scout, "strong": strong, "full_t": full_t, "eval_ann_return": eval_ann, "max_ref_corr": max_corr, "bar_version": "2026-11-04"},
+               "first_traded_day": str(first_pos.date()), "warmup_days_excluded": warmup_days, "turnover_per_day": turn, "cost_drag_per_yr": cost_yr, "funding_per_yr": fund_yr, "n_rebalances": n_rebal, "warnings": warns, "for_scout": for_scout, "strong": strong, "full_t": full_t, "eval_ann_return": eval_ann, "max_ref_corr": max_corr, "bar_version": "2026-11-04b"},
               open(base + "_result.json", "w"), indent=1, default=lambda x: float(x) if isinstance(x, (np.floating, np.integer)) else str(x))
     json.dump(best, open(base + "_best_config.json", "w"), indent=1, ensure_ascii=False)
     try:

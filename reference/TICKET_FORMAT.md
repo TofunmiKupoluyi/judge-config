@@ -61,7 +61,7 @@ Exactly one fenced ```json block in the description. Judge parses the LAST ```js
 **Concentration** — top-5 names' share of positive P&L
 **Redundancy** — correlation with the three reference sleeves
 
-**For Scout** — plain-words diagnosis of what failed (or, on PASS, what to watch): no signal in either window · signal only early / late · too weak to be sure · too small to matter · costs eat it · funding eats it · concentrated · tracks sleeve X · not robust to its parameters · fails the placebo · drawdown too deep. No engine numbers beyond the headline; no suggestions of parameter values.
+**For Scout** — plain-words diagnosis of what failed (or, on PASS, what to watch): no signal in either window · signal only early / late · too weak to be sure · too small to matter · costs eat it · funding eats it · concentrated · tracks sleeve X · not robust to its parameters · fails the placebo · placebo control off · drawdown too deep. No engine numbers beyond the headline; no suggestions of parameter values.
 
 **Next** → Critiqued (round n+1/5 is Scout's) | Discarded (five frameworks failed) | Human Review (bar passed)
 Exhibit: <ticket>_r<n>_backtest.html · numbers: <ticket>_r<n>_result.json · config: <ticket>_r<n>_best_config.json

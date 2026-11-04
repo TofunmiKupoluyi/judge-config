@@ -234,7 +234,7 @@ def simulate(cfg, data, targets, risk=True, cost_mult=1.0, governor=True):
 
 def run(cfg, data, risk=True, cost_mult=1.0, governor=True, shuffle_seed=None, window=None):
     """Full pipeline for one config. window=(start,end) restricts the sim (signals still use history before start).
-    shuffle_seed: permute the signal's symbol columns (placebo) with a fixed seed. An hourly config only has the raw sleeve here
+    shuffle_seed: the placebo — relabel the ranking within each row's ranked eligible names (`relabel`) with a fixed seed. An hourly config only has the raw sleeve here
     (risk=False, `run_raw_hourly`); its risk-framework run is `run_hourly`."""
     if resolution(cfg) == "1h":
         if risk or window:
@@ -243,8 +243,7 @@ def run(cfg, data, risk=True, cost_mult=1.0, governor=True, shuffle_seed=None, w
     universe = data.eligible(**{k: v for k, v in (cfg.get("universe") or {}).items() if k in ("min_mdv_usd", "min_age_days", "exclude", "include_only")})
     signal, _ = build_signal(cfg, data)
     if shuffle_seed is not None:
-        rng = np.random.default_rng(shuffle_seed); perm = rng.permutation(signal.columns.values)
-        signal = pd.DataFrame(signal.values, index=signal.index, columns=perm).reindex(columns=signal.columns)
+        signal = relabel(signal, universe, shuffle_seed)
     targets, n_rebal = build_targets(cfg, data, signal, universe)
     if window:
         a, b = pd.Timestamp(window[0], tz="UTC"), pd.Timestamp(window[1], tz="UTC")
@@ -259,11 +258,10 @@ def run_raw_hourly(cfg, data, cost_mult=1.0, shuffle_seed=None):
     """Raw sleeve of an hourly config (the daily `simulate(risk=False)` on the hourly grid): the book of row h held over the next hour,
     price P&L and funding prints, cost = taker fee + 3 bp per unit traded, no caps / hedge. Returns (daily frame, attr, n_entries)."""
     V = data.view("1h"); signal, _ = build_signal(cfg, V)
-    if shuffle_seed is not None:
-        rng = np.random.default_rng(shuffle_seed); perm = rng.permutation(signal.columns.values)
-        signal = pd.DataFrame(signal.values, index=signal.index, columns=perm).reindex(columns=signal.columns)
     u = cfg.get("universe") or {}
     universe = V.eligible(**{k: v for k, v in u.items() if k in ("min_mdv_usd", "min_age_days", "exclude", "include_only")})
+    if shuffle_seed is not None:
+        signal = relabel(signal, universe, shuffle_seed)
     T, n = build_targets(cfg, V, signal, universe); w = T.to_numpy()
     ret = V.field("ret").fillna(0.0).to_numpy(); fund = V.field("funding").fillna(0.0).to_numpy()
     cost_bps = RISK["cost_model"]["taker_fee_bps"] * cost_mult + 3.0 * cost_mult
@@ -308,6 +306,23 @@ EDGE_BPS = 8.0      # constant |edge| handed to the entry hurdle (|edge| × expe
                     # no-entry (delisting) mask still does
 
 
+def relabel(signal, universe, seed):
+    """The placebo (bar line 6): a random relabelling of the ranking that keeps the book's shape. On every row the ranked eligible
+    names keep their count and their value multiset; the k-th smallest value goes to the name with the k-th smallest fixed random
+    key, so the relabelling is persistent while the eligible set is. Replaces the whole-column permutation (2026-11-04b, NOS-44):
+    that dropped most of the signal onto names outside the universe, built books a third the size at three times the weight, and
+    the short-side caps plus the BTC hedge then gave every shuffled book the same ~10 %/yr bleed, whatever the ranking."""
+    rng = np.random.default_rng(seed); K = rng.random(len(signal.columns))
+    V = signal.where(universe.reindex(index=signal.index, columns=signal.columns).fillna(False)).to_numpy(dtype="float64", copy=True)
+    for i in range(V.shape[0]):
+        idx = np.flatnonzero(~np.isnan(V[i]))
+        if len(idx) < 2:
+            continue
+        vals = np.sort(V[i, idx]); order = idx[np.argsort(K[idx], kind="stable")]
+        V[i, order] = vals
+    return pd.DataFrame(V, index=signal.index, columns=signal.columns)
+
+
 def targets_hourly(T, hidx):
     """Daily target weights (row D = book intended from D 00:00, computed from data before D) → hourly panel stamped at OPEN time:
     row D−1 23:00 is the bar that closes at D 00:00, where the engine trades to the new book; held 24 rows until the next day's row."""
@@ -320,11 +335,10 @@ def run_hourly(cfg, data, panels, cost_mult=1.0, shuffle_seed=None, window=None,
     window = (a, b) restricts the simulation to that hourly segment (the calibration sweep)."""
     hourly = resolution(cfg) == "1h"; V = data.view(resolution(cfg))
     signal, _ = build_signal(cfg, V)
-    if shuffle_seed is not None:
-        rng = np.random.default_rng(shuffle_seed); perm = rng.permutation(signal.columns.values)
-        signal = pd.DataFrame(signal.values, index=signal.index, columns=perm).reindex(columns=signal.columns)
     u = cfg.get("universe", {})
     universe = V.eligible(u.get("min_mdv_usd", 3e6), u.get("min_age_days", 30), tuple(u.get("exclude", [BTC])), u.get("include_only"))
+    if shuffle_seed is not None:
+        signal = relabel(signal, universe, shuffle_seed)
     T, n_rebal = build_targets(cfg, V, signal, universe)
     cols = panels["close"].columns; T = T.reindex(columns=cols).fillna(0.0)
     if hourly:                                                       # row h = book from h → the bar opening at h−1h closes at h, where it trades

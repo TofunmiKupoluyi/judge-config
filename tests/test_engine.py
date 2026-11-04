@@ -9,7 +9,8 @@
   4. hourly resolution: the planted bucket also carries an hour-of-day continuation (each name's 07:00–08:00 UTC bar is
      followed by a same-signed 21:00–22:00 bar); the hourly example config must PASS on it and FAIL on NOISE
   5. build_targets matches the pre-numpy pandas implementation (kept below as the reference) on random daily data
-  6. checks extract_config's round logic on a synthetic thread
+  6. the placebo relabelling keeps each row's count and values and stays within the universe; plateau_neighbours clips, rounds and dedupes
+  7. checks extract_config's round logic on a synthetic thread
 
     python3 tests/test_engine.py            # prints PASS/FAIL per check, exit 1 on any failure
 """
@@ -191,6 +192,25 @@ def main():
                                  types.SimpleNamespace(dates=hrs, symbols=hs), hsig, huni)
         live = sorted({h.hour for h in T.index[(T.abs().sum(axis=1) > 0)]})
         check("engine: hourly rebalance_hours enter at 21:00 and hold 2 h", n == 3 and live == [21, 22] and abs(T.loc[hrs[21], "S11"] - 0.25) < 1e-12, f"entries {n}, live hours {live}")
+
+        # NOS-44 (2026-11-04b): the placebo keeps the book's shape — per row the same eligible names carry the same values, reassigned
+        rng = np.random.default_rng(3); dts2 = pd.date_range("2024-01-01", periods=30, freq="D", tz="UTC"); s2 = pd.Index([f"S{i:02d}" for i in range(30)])
+        sg = pd.DataFrame(rng.normal(size=(30, 30)), index=dts2, columns=s2); sg.iloc[:, 25:] = np.nan                    # five names never have a signal
+        un = pd.DataFrame(rng.uniform(size=(30, 30)) > 0.3, index=dts2, columns=s2); un.iloc[:10] = un.iloc[0].to_numpy()  # a stable eligible set for ten rows
+        rl = eng.relabel(sg, un, 1); rl2 = eng.relabel(sg, un, 2); base = sg.where(un)
+        same_set = all((rl.iloc[i].notna() == base.iloc[i].notna()).all() for i in range(30))
+        same_vals = all(np.allclose(np.sort(rl.iloc[i].dropna()), np.sort(base.iloc[i].dropna())) for i in range(30))
+        persistent = all(rl.iloc[i].rank().fillna(-1).equals(rl.iloc[0].rank().fillna(-1)) for i in range(1, 10))
+        moved = (rl.rank(axis=1) != base.rank(axis=1)).to_numpy()[base.notna().to_numpy()].mean() > 0.8
+        check("engine: relabel keeps each row's eligible names and values, is persistent, and differs by seed",
+              same_set and same_vals and persistent and moved and not rl.equals(rl2), f"moved {moved}, persistent {persistent}")
+        import judge_run as JR
+        ncfg = {"params": {"lb": {"value": 30, "range": [30, 120], "unit": "days", "integer": True}, "q": {"value": 0.3, "range": [0.1, 0.3]}}}
+        nbs = JR.plateau_neighbours(ncfg, ["params.lb", "params.q", "schedule.rebalance"], {"params.lb": 30, "params.q": 0.3, "schedule.rebalance": "1w"},
+                                    {(30, 0.3, "1w"), (38, 0.3, "1w")})
+        got = sorted((o["params.lb"], o["params.q"]) for o in nbs)
+        check("judge_run: plateau_neighbours clips to the range, rounds integers, drops the chosen and sampled points",
+              got == [(30, 0.15), (30, 0.225), (45, 0.3)] and all(o["schedule.rebalance"] == "1w" for o in nbs), str(got))
 
         # hourly validation rules
         hx = json.load(open(os.path.join(ROOT, "examples", "example_hour_of_day.json")))
