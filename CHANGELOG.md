@@ -1,5 +1,8 @@
 # Changelog
 
+## 2026-11-04c — 12 GB swap before every run
+- Runs were OOM-ing on the 8 GB box (an hourly config peaks ~10 GB). `AGENTS.md` §4 step 4 and the `research-judge` skill (step 3a) now have Judge make sure 12 GB of swap (`/swapfile`) is active before `judge_run.py`; the command is idempotent, and a failure is noted in the comment, not a reason to skip the run.
+
 ## 2026-11-04b — NOS-44: the placebo keeps the book's shape; the plateau runs its missing neighbours
 - Line 6's placebo is `engine.relabel`: on every rebalance row the ranked eligible names keep their count and their values and the k-th smallest value goes to the name with the k-th smallest fixed random key (persistent, seeds 1–3). The whole-column permutation it replaces dropped most of the signal onto names outside the universe, so the shuffled books held a third as many names at three times the weight; the short-side max-loss caps clipped their short legs, the BTC hedge shorted BTC against the long tilt, and short BTC lost ~10 %/yr over 2022–26 — the whole negative placebo on NOS-29, NOS-64 and NOS-126 (NOS-126 r2: seeds −1.33 / −0.69 / −3.00 gross of costs; relabelled +0.20 / +1.30 / −0.96). Gross of costs (2026-11-04) had only moved those by 0.2–0.3.
 - Line 7 never scores the chosen point's own Sharpe: when the grid sample holds fewer than two points within ±50 % of the chosen one, `judge_run.plateau_neighbours` runs its in-range neighbours (±25 %, ±50 % per swept numeric parameter, one axis at a time, chosen alternatives held) on the calibration window and the median is taken over those and the chosen point; they are listed in the result. "No numeric tunables" passes vacuously. NOS-29 r1's three dropped neighbours score +0.53 / +0.93 / +1.19 (plateau +1.06).
