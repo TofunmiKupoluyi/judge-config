@@ -1,0 +1,20 @@
+{
+ "schema_version": "1.1",
+ "hypothesis": "Late-informed traders carry a coin's 07:00-08:00 UTC move into its 21:00-22:00 UTC hour the same day.",
+ "framework": "Hourly grid. At 21:00 UTC rank the names by their BTC-residual return over the 07:00-08:00 UTC bar of the same day (13 bars earlier); buy the top N and sell the bottom N, equal weight, and hold for one hour, flat the rest of the day. Signal hour and holding hour are fixed by the mechanism; only the breadth is swept.",
+ "params": {
+  "n": {"value": 10, "range": [5, 15], "unit": "count", "integer": true}
+ },
+ "signal": {
+  "steps": [
+   {"op": "field", "name": "resid_ret", "out": "r"},
+   {"op": "lag", "in": "r", "window": 13, "out": "r_0708"},
+   {"op": "cross_rank", "in": "r_0708", "out": "score"}
+  ],
+  "output": "score"
+ },
+ "positions": {"mode": "top_bottom_n", "n": "$n", "weighting": "equal", "side_gross_pct": 50},
+ "schedule": {"resolution": "1h", "rebalance": "1h", "rebalance_hours": [21], "holding_hours": 1},
+ "alternatives": {"positions.weighting": ["rank"]},
+ "notes": "Worked hourly example: a time-of-day continuation, one entry a day at 21:00 UTC held one hour."
+}

@@ -1,11 +1,11 @@
 {
  "$schema": "https://json-schema.org/draft/2020-12/schema",
- "title": "Trade config v1 — what Scout hands to Judge; the only thing the engine reads",
+ "title": "Trade config v1.1 — what Scout hands to Judge; the only thing the engine reads",
  "type": "object",
  "required": ["schema_version", "hypothesis", "framework", "signal", "positions", "schedule"],
  "additionalProperties": false,
  "properties": {
-  "schema_version": {"const": "1.0"},
+  "schema_version": {"enum": ["1.1", "1.0"], "description": "1.1 adds schedule.resolution; 1.0 configs are read unchanged (daily)"},
   "experiment": {"type": "string", "description": "Linear ticket identifier once known (e.g. NOS-14); Scout may leave it empty on round 1"},
   "round": {"type": "integer", "minimum": 1, "maximum": 5, "description": "framework attempt number within the experiment"},
   "hypothesis": {"type": "string", "minLength": 10, "maxLength": 300, "description": "one line, plain words: the alpha claim"},
@@ -45,7 +45,7 @@
        "name": {"type": "string", "description": "field op: one of the data fields in the spec"},
        "in": {"type": "string", "description": "single-input ops: the series to transform"},
        "a": {"type": "string"}, "b": {"type": "string"},
-       "window": {"description": "rolling/ewm/lag/diff/pct_change: integer days or \"$param\"", "oneOf": [{"type": "integer", "minimum": 1}, {"type": "string"}]},
+       "window": {"description": "rolling/ewm/lag/diff/pct_change: integer bars — days, or hours at resolution 1h — or \"$param\"", "oneOf": [{"type": "integer", "minimum": 1}, {"type": "string"}]},
        "min_periods": {"oneOf": [{"type": "integer", "minimum": 1}, {"type": "string"}]},
        "lo": {"oneOf": [{"type": "number"}, {"type": "string"}]}, "hi": {"oneOf": [{"type": "number"}, {"type": "string"}]}, "value": {"oneOf": [{"type": "number"}, {"type": "string"}], "description": "const: number or \"$param\""},
        "cond": {"type": "string", "description": "where: boolean series"}, "then": {"type": "string"}, "else": {"type": "string"},
@@ -73,10 +73,14 @@
   "schedule": {
    "type": "object", "required": ["rebalance"], "additionalProperties": false,
    "properties": {
-    "rebalance": {"type": "string", "enum": ["1d", "2d", "3d", "1w", "2w"], "description": "how often targets are recomputed"},
-    "anchor": {"type": "string", "enum": ["monday", "any"], "default": "monday"},
-    "holding_days": {"oneOf": [{"type": "integer", "minimum": 1, "maximum": 60}, {"type": "string"}], "description": "how long a position is held after entry (default = rebalance interval)"},
-    "delay_days": {"type": "integer", "minimum": 0, "maximum": 3, "default": 0, "description": "execution delay after the signal date (engine always adds the point-in-time lag; this is extra)"}
+    "resolution": {"type": "string", "enum": ["1d", "1h"], "default": "1d", "description": "the grid the signal, positions and schedule live on: daily rows at 00:00 UTC, or hourly rows (bar fields become the hour's bar; windows count hours)"},
+    "rebalance": {"type": "string", "enum": ["1d", "2d", "3d", "1w", "2w", "1h", "2h", "4h", "6h", "8h", "12h"], "description": "how often targets are recomputed; 1d 2d 3d 1w 2w at resolution 1d, 1h 2h 4h 6h 8h 12h 1d at resolution 1h (entries at UTC hours divisible by the interval)"},
+    "anchor": {"type": "string", "enum": ["monday", "any"], "default": "monday", "description": "resolution 1d only"},
+    "holding_days": {"oneOf": [{"type": "integer", "minimum": 1, "maximum": 60}, {"type": "string"}], "description": "resolution 1d: how long a position is held after entry (default = rebalance interval)"},
+    "delay_days": {"type": "integer", "minimum": 0, "maximum": 3, "default": 0, "description": "resolution 1d: execution delay after the signal date (engine always adds the point-in-time lag; this is extra)"},
+    "rebalance_hours": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 23}, "minItems": 1, "uniqueItems": true, "description": "resolution 1h with rebalance 1h: enter only at these UTC hours each day (time-of-day ideas); flat between holds"},
+    "holding_hours": {"oneOf": [{"type": "integer", "minimum": 1, "maximum": 720}, {"type": "string"}], "description": "resolution 1h: how long a position is held after entry (default = rebalance interval)"},
+    "delay_hours": {"type": "integer", "minimum": 0, "maximum": 24, "default": 0, "description": "resolution 1h: extra execution delay in hours"}
    }
   },
   "alternatives": {

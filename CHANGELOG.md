@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-11-04 — hourly resolution (schema 1.1); placebo gross of costs
+- A config may set `schedule.resolution: "1h"`: the signal, positions and schedule run on an hourly grid (row h = bars closed by h). Bar fields become the hour's bar, `hour_utc` and `dow` stamp the row, every other field is the daily value carried from the last 00:00. Schedule keys `rebalance` 1h–12h/1d, `rebalance_hours`, `holding_hours`, `delay_hours`. Daily configs (schema 1.0, or no resolution) run unchanged. New daily field `dow`.
+- `tools/data.py` keeps the hourly bars when asked (`Data(..., hourly=True).view("1h")`, fields built lazily); `engine.build_targets` is resolution-agnostic and per-row numpy (checked against the pandas rule it replaced); `run_hourly` hands an hourly book to the Obsidian engine as is; `run_raw_hourly` is the hourly raw sleeve. Production execution rules apply unchanged (4-hour resize gate, no-trade band, 5 % hourly participation).
+- Validator and schema accept the hourly keys and refuse the daily-only ones at 1h; new `examples/example_hour_of_day.json`; the offline test adds a planted hour-of-day PASS / noise FAIL, the numpy-vs-pandas parity check and the hourly validation rules.
+- Pass bar version 2026-11-04: line 6's placebo runs are scored gross of costs. Net, a high-turnover book's shuffled copies lose its fees with near certainty (t = −27 on planted hourly data), which failed every hourly config without being the "construction earns it" fakeness the line exists for. Costs stay judged by lines 1–5.
+- Real-bucket smoke run (832 symbols, 44,568 hours): an hourly config takes ~50 s at `--max-grid 3 --quick` and ~10 GB peak memory, about 2.7 GB above a daily one.
+
 ## 2026-11-03 — session id on every research write
 - Every POST/PUT/PATCH to the research API sends `X-Session-Id: <your session id>` (from the system prompt); a write without it is a 400. The store records it as provenance (who filed or closed an idea, who requested or resolved a data source, who indexed a paper), so each row links back to its run.
 

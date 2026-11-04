@@ -21,7 +21,7 @@ hypothesis: <slug> — <one-line hypothesis>
 
 ## Trade config
 ```json
-{ ...the config, schema 1.0, "round": 1, "experiment": "" ... }
+{ ...the config, schema 1.1, "round": 1, "experiment": "" ... }
 ```
 
 ## Expectation

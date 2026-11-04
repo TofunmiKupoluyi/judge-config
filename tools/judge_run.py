@@ -34,6 +34,8 @@ ANN = 365
 CALIB = ("2022-01-01", "2023-12-31")
 BAR = {"sharpe_min_both": 0.5, "sharpe_min_eval": 0.75, "full_t_min": 1.65, "eval_ann_return_min": 0.05, "max_dd_max": 0.20, "sharpe_2x_min": 0.4,
        "placebo_t_max": 1.5, "plateau_sharpe_min": 0.5, "plateau_band": 0.5, "top5_share_max": 0.5, "ref_corr_max": 0.7, "strong_sharpe_both": 1.0}
+# 2026-11-04: the placebo runs are scored gross of costs (cost_mult 0) — shuffled names trading a high-turnover book lose its fees
+# reliably, and that negative t is not the "construction earns it" fakeness the line exists for (it failed every hourly config).
 # 2026-10-13 (Dominik): a TRIAGE bar for Human Review, not an adoption bar — inclusive on magnitude, strict on fakeness. Sharpe ≥ 0.5 in both
 # windows and ≥ 0.75 in evaluation; significance on the full sample as a t-stat (≥ 1.65, one-sided 95 %; ≈ Sharpe 0.75 over 4.7 years, adapts
 # as the window grows); evaluation annualised net return ≥ 5 %; max DD ≤ 20 % (no governor); 2× costs Sharpe > 0.4; placebo |t| < 1.5; plateau
@@ -93,7 +95,7 @@ def main():
         print("\n".join("error: " + e for e in errs)); sys.exit(2)
     eval_end = a.eval_end or (pd.Timestamp.utcnow().normalize().replace(day=1) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
     os.makedirs(a.out, exist_ok=True); tag = f"{a.ticket}_r{a.round}"
-    P = PN.load(a.data, start=a.start, end=eval_end); data = Data(a.data, start=a.start, end=eval_end, panels=P)
+    P = PN.load(a.data, start=a.start, end=eval_end); data = Data(a.data, start=a.start, end=eval_end, panels=P, hourly=E.resolution(cfg) == "1h")
     for k in ("high", "low", "trades", "oi_usd", "tbq"):
         P.pop(k, None)                                           # daily fields built; free the hourly extras before the sims
     # ---------------- sweep on calibration only
@@ -136,11 +138,11 @@ def main():
     turn = float(daily["turnover"].mean()); cost_yr = float(daily["costs"].mean() * ANN); fund_yr = float(daily["funding"].mean() * ANN)
     # ---------------- verification battery (chosen config only)
     log("verification: raw sleeve, 2x costs, placebo, concentration, reference sleeves")
-    raw, _, _ = E.run(best, data, risk=False); raw = raw[raw.index >= first_pos]; s_raw = stats(raw["ret"])      # daily diagnostic: no caps / hedge
+    raw, _, _ = E.run(best, data, risk=False); raw = raw[raw.index >= first_pos]; s_raw = stats(raw["ret"])      # diagnostic on the config's grid: no caps / hedge
     d2x, _, _ = run_full(best, cost_mult=2.0); d2x = d2x[d2x.index >= first_pos]; s_2x = stats(d2x["ret"])
     pl = []
     for sd in (1, 2, 3):
-        dp, _, _ = run_full(best, shuffle_seed=sd); dp = dp[dp.index >= first_pos]; r = dp["ret"].dropna(); pl.append(float(r.mean() / r.std() * np.sqrt(len(r))) if r.std() > 0 else np.nan)
+        dp, _, _ = run_full(best, shuffle_seed=sd, cost_mult=0.0); dp = dp[dp.index >= first_pos]; r = dp["ret"].dropna(); pl.append(float(r.mean() / r.std() * np.sqrt(len(r))) if r.std() > 0 else np.nan)
     placebo_t = float(np.nanmean(pl))
     pos_attr = attr[attr > 0]; top5 = float(pos_attr.sort_values(ascending=False).head(5).sum() / pos_attr.sum()) if pos_attr.sum() > 0 else np.nan
     top5_names = attr.sort_values(ascending=False).head(5).round(4).to_dict()
@@ -165,7 +167,7 @@ def main():
         f"evaluation annualised net return ≥ {BAR['eval_ann_return_min']:.0%}": (eval_ann >= BAR["eval_ann_return_min"], f"{eval_ann:+.1%}/yr (cum {e_['return']:+.1%})"),
         f"max drawdown ≤ {BAR['max_dd_max']:.0%} (full, no governor)": (f_["max_dd"] >= -BAR["max_dd_max"], f"{f_['max_dd']:.1%}"),
         f"Sharpe > {BAR['sharpe_2x_min']} at 2× costs (full)": (s_2x["sharpe"] > BAR["sharpe_2x_min"], f"{s_2x['sharpe']:+.2f}"),
-        f"placebo (shuffled names) |t| < {BAR['placebo_t_max']}": (abs(placebo_t) < BAR["placebo_t_max"], f"{placebo_t:+.2f} (3 seeds)"),
+        f"placebo (shuffled names, gross of costs) |t| < {BAR['placebo_t_max']}": (abs(placebo_t) < BAR["placebo_t_max"], f"{placebo_t:+.2f} (3 seeds)"),
         f"parameter plateau: neighbours within ±{BAR['plateau_band']:.0%} keep calib Sharpe ≥ {BAR['plateau_sharpe_min']}": (not np.isfinite(plateau) or plateau >= BAR["plateau_sharpe_min"], f"median {plateau:+.2f}" if np.isfinite(plateau) else "no tunables"),
         f"top-5 names ≤ {BAR['top5_share_max']:.0%} of positive P&L": (np.isfinite(top5) and top5 <= BAR["top5_share_max"], f"{top5:.0%}" if np.isfinite(top5) else "n/a"),
         f"diversification: max |corr| with the production sleeves ≤ {BAR['ref_corr_max']}": (not np.isfinite(max_corr) or max_corr <= BAR["ref_corr_max"], (f"max |corr| {max_corr:.2f}" if np.isfinite(max_corr) else "reference sleeves not run (--quick)")),
@@ -214,7 +216,7 @@ def main():
     md = [f"[JUDGE RESULT {a.round}/5 — {verdict}]", f"**{a.ticket} — {cfg['hypothesis']}**", f"Framework {a.round}: {cfg['framework'][:220]}{'…' if len(cfg['framework']) > 220 else ''}", "",
           "**Headline** (best config of the sweep, selected on calibration only; Obsidian production-replica engine, hourly: caps, max-loss tiers, GMV cap, no-trade band, participation cap, BTC hedge, full cost model, per-print funding; no drawdown governor)" + (f"  · first traded day {first_pos.date()} ({warmup_days} warm-up days excluded)" if warmup_days else ""), "",
           "| window / year | return | Sharpe | Sortino | max DD | worst day | hit rate | days |", "|---|---|---|---|---|---|---|---|"] + [row(k, v) for k, v in H.items()] + [
-          f"\nTurnover {turn:.3f} × N/day · cost drag {cost_yr:.2%}/yr · funding P&L {fund_yr:+.2%}/yr · rebalances {n_rebal} · raw sleeve (daily, no caps/hedge) Sharpe {s_raw['sharpe']:+.2f} · worst 1/7/30 d {worst['worst_1d']:+.1%} / {worst['worst_7d']:+.1%} / {worst['worst_30d']:+.1%}",
+          f"\nTurnover {turn:.3f} × N/day · cost drag {cost_yr:.2%}/yr · funding P&L {fund_yr:+.2%}/yr · rebalances {n_rebal} · raw sleeve ({'hourly' if E.resolution(cfg) == '1h' else 'daily'}, no caps/hedge) Sharpe {s_raw['sharpe']:+.2f} · worst 1/7/30 d {worst['worst_1d']:+.1%} / {worst['worst_7d']:+.1%} / {worst['worst_30d']:+.1%}",
           "", "**Bar**", ""] + [f"- {'✓' if v[0] else '✗'} {k}: {v[1]}" for k, v in checks.items()] + [
           "", f"**Strength** {'STRONG — also clears Sharpe ≥ 1.0 in both windows' if strong else 'standard'}" if passed else "",
           "", f"**Sweep** {len(combos)} of {full_size} combinations over {', '.join(keys) if keys else 'no tunables'}; best = " + (", ".join(f"{k.split('.')[-1]}={v}" for k, v in best_ov.items()) if best_ov else "the submitted config") +
@@ -230,7 +232,7 @@ def main():
     json.dump({"ticket": a.ticket, "round": a.round, "verdict": verdict, "failed": failed, "eval_end": eval_end, "headline": H, "bar": {k: {"pass": bool(v[0]), "value": v[1]} for k, v in checks.items()},
                "sweep": {"keys": keys, "n_run": len(combos), "n_full": full_size, "best": best_ov, "plateau_median_sharpe": plateau, "top10": sw.head(10).to_dict("records")},
                "raw_sleeve": s_raw, "two_x_costs": s_2x, "placebo_t": placebo_t, "placebo_seeds": pl, "top5_share": top5, "top5_names": top5_names, "worst": worst, "reference_corr": ref_corr,
-               "first_traded_day": str(first_pos.date()), "warmup_days_excluded": warmup_days, "turnover_per_day": turn, "cost_drag_per_yr": cost_yr, "funding_per_yr": fund_yr, "n_rebalances": n_rebal, "warnings": warns, "for_scout": for_scout, "strong": strong, "full_t": full_t, "eval_ann_return": eval_ann, "max_ref_corr": max_corr, "bar_version": "2026-10-13"},
+               "first_traded_day": str(first_pos.date()), "warmup_days_excluded": warmup_days, "turnover_per_day": turn, "cost_drag_per_yr": cost_yr, "funding_per_yr": fund_yr, "n_rebalances": n_rebal, "warnings": warns, "for_scout": for_scout, "strong": strong, "full_t": full_t, "eval_ann_return": eval_ann, "max_ref_corr": max_corr, "bar_version": "2026-11-04"},
               open(base + "_result.json", "w"), indent=1, default=lambda x: float(x) if isinstance(x, (np.floating, np.integer)) else str(x))
     json.dump(best, open(base + "_best_config.json", "w"), indent=1, ensure_ascii=False)
     try:

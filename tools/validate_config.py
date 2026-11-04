@@ -19,19 +19,23 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCHEMA = os.path.join(HERE, "..", "reference", "TRADE_CONFIG_SCHEMA.json")
 
-# the data fields the engine exposes (daily, point-in-time; see the trade-config-spec skill) — keep in sync with tools/data.py
+# the data fields the engine exposes (point-in-time; see the trade-config-spec skill) — keep in sync with tools/data.py
 FIELDS = {
  "close", "ret", "log_ret", "resid_ret", "high", "low", "range_pct", "hl_spread_1m", "hl_spread_1m_median", "volume_usd", "taker_buy_usd", "taker_sell_usd", "taker_imbalance",
  "taker_net_usd", "taker_gross_usd", "taker_net_small_usd", "taker_gross_small_usd", "taker_net_large_usd", "taker_gross_large_usd",
  "n_trades", "funding", "funding_3d", "mdv21", "adv7", "oi_usd", "oi_change_1d", "ls_ratio_acct", "ls_ratio_top_acct", "ls_ratio_top_pos", "taker_ls_vol",
- "btc_ret", "age_days", "amihud21", "vol30", "mcap"
+ "btc_ret", "age_days", "amihud21", "vol30", "dow", "mcap"
 }
+FIELDS_1H = FIELDS | {"hour_utc"}          # resolution "1h": the bar fields are the hour's bar; hour_utc / dow stamp the row's hour
 OPS_1 = {"rolling_mean", "rolling_sum", "rolling_std", "rolling_max", "rolling_min", "rolling_median", "ewm_mean", "lag", "diff", "pct_change", "zscore_time"}
 OPS_U = {"log", "abs", "neg", "sign", "cross_rank", "cross_zscore", "cross_demean"}
 OPS_2 = {"add", "sub", "mul", "div", "pow", "and", "or"}
 ALL_OPS = OPS_1 | OPS_U | OPS_2 | {"field", "clip", "where", "gt", "lt", "const"}
 MODES = {"top_bottom_n": ["n"], "quantile": ["quantile"], "threshold": [], "proportional": []}
 REBAL = {"1d", "2d", "3d", "1w", "2w"}
+REBAL_1H = {"1h", "2h", "4h", "6h", "8h", "12h", "1d"}
+DAILY_ONLY = ("anchor", "holding_days", "delay_days")
+HOURLY_ONLY = ("rebalance_hours", "holding_hours", "delay_hours")
 
 
 def _p(cfg, v, errors, where):
@@ -53,8 +57,12 @@ def validate(cfg):
             errors.append(f"missing top-level key {k!r}")
     if errors:
         return errors, warnings
-    if cfg["schema_version"] != "1.0":
-        errors.append("schema_version must be \"1.0\"")
+    if cfg["schema_version"] not in ("1.0", "1.1"):
+        errors.append("schema_version must be \"1.1\" (\"1.0\" is still accepted)")
+    res = (cfg.get("schedule") or {}).get("resolution", "1d")
+    if res not in ("1d", "1h"):
+        errors.append("schedule.resolution must be \"1d\" or \"1h\""); res = "1d"
+    hourly = res == "1h"; unit = "hour" if hourly else "day"; fields = FIELDS_1H if hourly else FIELDS
     if not (10 <= len(cfg["hypothesis"]) <= 300):
         errors.append("hypothesis must be 10–300 characters, one line")
     if "\n" in cfg["hypothesis"].strip():
@@ -85,8 +93,8 @@ def validate(cfg):
         if not out or not re.match(r"^[a-z][a-z0-9_]*$", out):
             errors.append(f"{w}: 'out' must be a snake_case name")
         if op == "field":
-            if st.get("name") not in FIELDS:
-                errors.append(f"{w}: field {st.get('name')!r} is not a data field; known: {sorted(FIELDS)}")
+            if st.get("name") not in fields:
+                errors.append(f"{w}: field {st.get('name')!r} is not a data field at resolution {res}; known: {sorted(fields)}")
         elif op == "const":
             if "value" not in st:
                 errors.append(f"{w}: const needs 'value'")
@@ -99,9 +107,9 @@ def validate(cfg):
             if win is None and op != "zscore_time":
                 errors.append(f"{w}: needs 'window'")
             elif win is not None and win < 1:
-                errors.append(f"{w}: window must be ≥ 1 day")
-            elif win is not None and win > 365:
-                warnings.append(f"{w}: window {win:.0f} days is long; lookbacks above 180 days are rarely justified")
+                errors.append(f"{w}: window must be ≥ 1 {unit}")
+            elif win is not None and win > (365 * 24 if hourly else 365):
+                warnings.append(f"{w}: window {win:.0f} {unit}s is long; lookbacks above 180 days are rarely justified")
         elif op in OPS_U:
             if st.get("in") not in produced:
                 errors.append(f"{w}: input {st.get('in')!r} not produced by an earlier step")
@@ -157,20 +165,32 @@ def validate(cfg):
     if not pos.get("long", True) and not pos.get("short", True):
         errors.append("positions: at least one side must be on")
     # schedule
-    sch = cfg["schedule"]
-    if sch.get("rebalance") not in REBAL:
-        errors.append(f"schedule.rebalance must be one of {sorted(REBAL)}")
-    if "holding_days" in sch:
-        h = _p(cfg, sch["holding_days"], errors, "schedule.holding_days")
-        if h is not None and not (1 <= h <= 60):
-            errors.append("schedule.holding_days must be 1–60")
+    sch = cfg["schedule"]; rebal = REBAL_1H if hourly else REBAL
+    if sch.get("rebalance") not in rebal:
+        errors.append(f"schedule.rebalance must be one of {sorted(rebal)} at resolution {res}")
+    for k in (DAILY_ONLY if hourly else HOURLY_ONLY):
+        if k in sch:
+            errors.append(f"schedule.{k} is not used at resolution {res}" + (" (use the *_hours keys)" if hourly else " (needs \"resolution\": \"1h\")"))
+    if hourly and "rebalance_hours" in sch:
+        rh = sch["rebalance_hours"]
+        if not isinstance(rh, list) or not rh or any(not isinstance(h, int) or isinstance(h, bool) or not 0 <= h <= 23 for h in rh) or len(set(rh)) != len(rh):
+            errors.append("schedule.rebalance_hours must be a non-empty list of distinct UTC hours 0–23")
+        if sch.get("rebalance") != "1h":
+            errors.append("schedule.rebalance_hours needs rebalance \"1h\" (the listed hours replace the interval)")
+    hold_key, hold_max = ("holding_hours", 24 * 30) if hourly else ("holding_days", 60)
+    if hold_key in sch:
+        h = _p(cfg, sch[hold_key], errors, f"schedule.{hold_key}")
+        if h is not None and not (1 <= h <= hold_max):
+            errors.append(f"schedule.{hold_key} must be 1–{hold_max}")
+    if hourly and "delay_hours" in sch and not (isinstance(sch["delay_hours"], int) and 0 <= sch["delay_hours"] <= 24):
+        errors.append("schedule.delay_hours must be an integer 0–24")
     # alternatives
     for k, v in (cfg.get("alternatives") or {}).items():
         if k == "signal.output":
             bad = [x for x in v if x not in produced]
             if bad:
                 errors.append(f"alternatives.signal.output: {bad} are not produced series")
-        elif k == "schedule.rebalance" and any(x not in REBAL for x in v):
+        elif k == "schedule.rebalance" and any(x not in rebal for x in v):
             errors.append("alternatives.schedule.rebalance has an unknown value")
     return errors, warnings
 

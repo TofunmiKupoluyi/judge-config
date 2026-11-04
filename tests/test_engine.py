@@ -6,7 +6,10 @@
   2. validates the four example configs
   3. runs judge_run on the illiquidity sleeve against both: NOISE must FAIL, PLANTED must PASS, and the first line of the
      result markdown must carry the verdict
-  4. checks extract_config's round logic on a synthetic thread
+  4. hourly resolution: the planted bucket also carries an hour-of-day continuation (each name's 07:00–08:00 UTC bar is
+     followed by a same-signed 21:00–22:00 bar); the hourly example config must PASS on it and FAIL on NOISE
+  5. build_targets matches the pre-numpy pandas implementation (kept below as the reference) on random daily data
+  6. checks extract_config's round logic on a synthetic thread
 
     python3 tests/test_engine.py            # prints PASS/FAIL per check, exit 1 on any failure
 """
@@ -38,6 +41,9 @@ def build_bucket(root, planted, seed=11, n_alts=60):
             L = lvl[j - 1]; rank = (j - 1) / (n_alts - 1)
             drift = ((0.0006 / 24) * (1.0 if rank < 0.34 else (-1.0 if rank > 0.66 else 0.0))) if planted else 0.0   # flat premium inside each tercile: no single name dominates
             r = rng.uniform(0.6, 1.6) * btc + rng.normal(0, 0.006, len(hours)) + drift
+            if planted:                                   # hour-of-day continuation for the hourly example: bar 07:00 → bar 21:00 same day
+                i7 = np.flatnonzero(hours.hour == 7); i7 = i7[i7 + 14 < len(hours)]
+                r[i7 + 14] += 0.004 * np.sign(r[i7] - btc[i7])
         px = 100 * np.exp(np.cumsum(r)); qv = np.exp(rng.normal(L - np.log(24), 0.4, len(hours))); tb = qv * rng.uniform(0.4, 0.6, len(hours))
         rows.append(pd.DataFrame({"symbol": s, "time": hours, "open": px, "high": px * 1.001, "low": px * 0.999, "close": px, "volume": qv / px, "quote_volume": qv,
                                   "trades": 100, "taker_buy_volume": tb / px, "taker_buy_quote_volume": tb}))
@@ -51,6 +57,66 @@ def build_bucket(root, planted, seed=11, n_alts=60):
     m = pd.concat([pd.DataFrame({"symbol": s, "time": days, "sum_open_interest": 1e6, "sum_open_interest_value": 2e7, "count_toptrader_long_short_ratio": 1.0,
                                  "sum_toptrader_long_short_ratio": 1.0, "count_long_short_ratio": 1.0, "sum_taker_long_short_vol_ratio": 1.0}) for s in syms])
     os.makedirs(f"{root}/metrics/interval=1d", exist_ok=True); m.to_parquet(f"{root}/metrics/interval=1d/data.parquet", index=False)
+
+
+def _ref_rebalance_days(E, dates, cfg):
+    sch = cfg["schedule"]; n = E.REBAL_DAYS[sch["rebalance"]]
+    if n >= 7 and sch.get("anchor", "monday") == "monday":
+        base = dates[dates.dayofweek == 0]; return base[::n // 7]
+    return dates[::n]
+
+
+def _reference_targets(E, cfg, data, signal, universe):
+    """The pre-2026-11-04 pandas positions rule, kept as the reference the numpy build_targets must reproduce. Per-day target weight frame (fraction of notional, pre-risk) from the positions rule, with holding-period averaging."""
+    pos = cfg["positions"]; mode = pos["mode"]; weighting = pos.get("weighting", "equal")
+    side = float(pos.get("side_gross_pct", 50)) / 100.0; per_name = pos.get("per_name_bps")
+    do_long, do_short = pos.get("long", True), pos.get("short", True)
+    hold = E._int(cfg, cfg["schedule"]["holding_days"]) if "holding_days" in cfg["schedule"] else E.REBAL_DAYS[cfg["schedule"]["rebalance"]]
+    delay = int(cfg["schedule"].get("delay_days", 0))
+    rdays = _ref_rebalance_days(E, data.dates, cfg); sig = signal.where(universe)
+    entries = {}   # date -> weight Series
+    for d in rdays:
+        s = sig.loc[d].dropna()
+        if len(s) < 10:
+            continue
+        w = pd.Series(0.0, index=s.index)
+        if mode == "top_bottom_n":
+            n = max(1, E._int(cfg, pos["n"])); r = s.rank(method="first", ascending=False)
+            L = s[r <= n]; Sh = s[r > len(s) - n]
+        elif mode == "quantile":
+            q = float(E._resolve(cfg, pos["quantile"])); r = s.rank(pct=True, method="first")
+            L = s[r > 1 - q]; Sh = s[r <= q]
+        elif mode == "threshold":
+            L = s[s > float(E._resolve(cfg, pos["long_above"]))] if "long_above" in pos else s.iloc[0:0]
+            Sh = s[s < float(E._resolve(cfg, pos["short_below"]))] if "short_below" in pos else s.iloc[0:0]
+        else:  # proportional: all names, weight ∝ demeaned signal
+            z = s - s.mean(); L = z[z > 0]; Sh = z[z < 0]
+        def leg(x, sign):
+            if len(x) == 0:
+                return
+            if weighting == "equal" or mode == "proportional":
+                base = x.abs() if mode == "proportional" else pd.Series(1.0, index=x.index)
+            elif weighting == "signal":                       # weight ∝ distance from the cross-sectional median (extremes get more)
+                base = (x - s.median()).abs() + 1e-12
+            else:  # rank: the most extreme name of the leg gets the largest weight on either side
+                base = (x if sign > 0 else -x).rank().astype(float)
+            base = base / base.sum()
+            w.loc[x.index] = sign * (per_name / 1e4 * len(x) if per_name else side) * base
+        if do_long:
+            leg(L, +1)
+        if do_short:
+            leg(Sh, -1)
+        entries[d] = w
+    # expand entries over the holding period (average of live entries); shift by the execution delay
+    T = pd.DataFrame(0.0, index=data.dates, columns=data.symbols); cnt = pd.Series(0, index=data.dates, dtype=float)
+    pos_idx = {d: i for i, d in enumerate(data.dates)}
+    for d, w in entries.items():
+        wv = w.reindex(data.symbols).fillna(0.0).to_numpy()  # align by label first: .iloc row writes are positional, and the panel columns are not sorted (NOS-40)
+        i0 = pos_idx[d] + delay
+        for i in range(i0, min(i0 + hold, len(data.dates))):
+            T.iloc[i] = T.iloc[i].to_numpy() + wv; cnt.iloc[i] += 1
+    T = T.div(cnt.replace(0, np.nan), axis=0).fillna(0.0)
+    return T, len(entries)
 
 
 def run(cmd, **kw):
@@ -103,17 +169,59 @@ def main():
               held == want_long | want_short and all(abs(T[c].max() - 0.5 / 3) < 1e-12 for c in want_long)
               and all(abs(T[c].min() + 0.5 / 3) < 1e-12 for c in want_short), f"held: {sorted(held)}")
 
-        cfg = os.path.join(ROOT, "examples", "ref_illiquidity.json")
-        for name, planted, want in (("NOISE", False, "FAIL"), ("PLANTED", True, "PASS")):
-            b = os.path.join(tmp, name); build_bucket(b, planted)
-            out = os.path.join(tmp, "out_" + name)
+        # the numpy positions rule reproduces the pandas one it replaced, on every mode × weighting, with holding overlap and delay
+        rng = np.random.default_rng(5); dts = pd.date_range("2024-01-01", periods=60, freq="D", tz="UTC"); syms = pd.Index([f"S{i:02d}" for i in range(40)][::-1])
+        sig = pd.DataFrame(rng.normal(size=(60, 40)), index=dts, columns=syms); sig.iloc[:, :3] = sig.iloc[:, :3].round(0)   # ties
+        uni = pd.DataFrame(rng.uniform(size=(60, 40)) > 0.2, index=dts, columns=syms); stub = types.SimpleNamespace(dates=dts, symbols=syms)
+        worst = 0.0
+        for posn in ({"mode": "top_bottom_n", "n": 6}, {"mode": "quantile", "quantile": 0.3}, {"mode": "threshold", "long_above": 0.5, "short_below": -0.4},
+                     {"mode": "proportional"}, {"mode": "top_bottom_n", "n": 25}, {"mode": "quantile", "quantile": 0.2, "per_name_bps": 40, "short": False}):
+            for wt in ("equal", "signal", "rank"):
+                for sch in ({"rebalance": "1d"}, {"rebalance": "3d", "holding_days": 7, "delay_days": 1}, {"rebalance": "1w", "anchor": "monday", "holding_days": 10}):
+                    c = {"params": {}, "positions": dict(posn, weighting=wt), "schedule": sch}
+                    a, na = eng.build_targets(c, stub, sig, uni); b, nb = _reference_targets(eng, c, stub, sig, uni)
+                    worst = max(worst, float(np.abs(a.to_numpy() - b.reindex(index=a.index, columns=a.columns).to_numpy()).max())); assert na == nb
+        check("engine: numpy build_targets = the pandas reference (max |diff| < 1e-12)", worst < 1e-12, f"max |diff| {worst:.1e}")
+
+        # hourly schedule: entries only at the listed UTC hours, held for holding_hours, flat in between
+        hrs = pd.date_range("2024-01-01", periods=72, freq="h", tz="UTC"); hs = pd.Index([f"S{i:02d}" for i in range(12)])
+        hsig = pd.DataFrame(np.tile(np.arange(12.0), (72, 1)), index=hrs, columns=hs); huni = pd.DataFrame(True, index=hrs, columns=hs)
+        T, n = eng.build_targets({"params": {}, "positions": {"mode": "top_bottom_n", "n": 2},
+                                  "schedule": {"resolution": "1h", "rebalance": "1h", "rebalance_hours": [21], "holding_hours": 2}},
+                                 types.SimpleNamespace(dates=hrs, symbols=hs), hsig, huni)
+        live = sorted({h.hour for h in T.index[(T.abs().sum(axis=1) > 0)]})
+        check("engine: hourly rebalance_hours enter at 21:00 and hold 2 h", n == 3 and live == [21, 22] and abs(T.loc[hrs[21], "S11"] - 0.25) < 1e-12, f"entries {n}, live hours {live}")
+
+        # hourly validation rules
+        hx = json.load(open(os.path.join(ROOT, "examples", "example_hour_of_day.json")))
+        for name, mut, want_ok in (("hourly example", lambda c: None, True),
+                                   ("hour_utc on a daily config", lambda c: (c["schedule"].clear(), c["schedule"].update({"rebalance": "1d"})), False),
+                                   ("holding_days at 1h", lambda c: c["schedule"].update({"holding_days": 2}), False),
+                                   ("rebalance 1w at 1h", lambda c: (c["schedule"].pop("rebalance_hours"), c["schedule"].update({"rebalance": "1w"})), False),
+                                   ("rebalance_hours with 4h", lambda c: c["schedule"].update({"rebalance": "4h"}), False),
+                                   ("rebalance_hours out of range", lambda c: c["schedule"].update({"rebalance_hours": [24]}), False)):
+            c = json.loads(json.dumps(hx))
+            if name == "hour_utc on a daily config":
+                c["signal"]["steps"].append({"op": "field", "name": "hour_utc", "out": "hr"})
+            mut(c); p = os.path.join(tmp, "h.json"); json.dump(c, open(p, "w")); r = run([os.path.join(TOOLS, "validate_config.py"), p])
+            check(f"validate: {name} → {'valid' if want_ok else 'error'}", (r.returncode == 0) == want_ok, (r.stdout or r.stderr).strip().splitlines()[-1][:110])
+
+        cases = (("ref_illiquidity.json", "NOISE", False, "FAIL"), ("ref_illiquidity.json", "PLANTED", True, "PASS"),
+                 ("example_hour_of_day.json", "NOISE", False, "FAIL"), ("example_hour_of_day.json", "PLANTED", True, "PASS"))
+        for ex, name, planted, want in cases:
+            cfg = os.path.join(ROOT, "examples", ex)
+            b = os.path.join(tmp, name)
+            if not os.path.exists(b):
+                build_bucket(b, planted)
+            out = os.path.join(tmp, f"out_{name}_{ex}")
             r = run([os.path.join(TOOLS, "judge_run.py"), "--config", cfg, "--ticket", "T", "--round", "1", "--out", out, "--data", b, "--eval-end", "2025-12-31", "--max-grid", "6", "--quick"])
             vl = [l for l in r.stdout.splitlines() if l.startswith("[JUDGE RESULT")]; first = vl[0] if vl else (r.stdout.strip().splitlines()[-1] if r.stdout.strip() else r.stderr[-300:])
-            check(f"judge_run on {name} → {want}", r.returncode == 0 and first == f"[JUDGE RESULT 1/5 — {want}]", first)
+            check(f"judge_run {ex} on {name} → {want}", r.returncode == 0 and first == f"[JUDGE RESULT 1/5 — {want}]", first)
             if r.returncode == 0:
                 res = json.load(open(os.path.join(out, "T_r1_result.json")))
-                check(f"{name}: result json verdict + for_scout present", res["verdict"] == want and bool(res.get("for_scout")), res.get("for_scout", "")[:80])
-                check(f"{name}: files written", all(os.path.exists(os.path.join(out, f"T_r1_{x}")) for x in ("result.md", "result.json", "best_config.json", "daily.csv")))
+                check(f"{ex} {name}: result json verdict + for_scout present", res["verdict"] == want and bool(res.get("for_scout")), res.get("for_scout", "")[:80])
+                check(f"{ex} {name}: files written", all(os.path.exists(os.path.join(out, f"T_r1_{x}")) for x in ("result.md", "result.json", "best_config.json", "daily.csv")))
+        cfg = os.path.join(ROOT, "examples", "ref_illiquidity.json")
         # extract_config round logic
         c = json.load(open(cfg)); t = "## Trade config\n```json\n" + json.dumps(c) + "\n```\n"
         t2 = t + "\n[JUDGE RESULT 1/5 — FAIL]\n```json\n{\"x\": 1}\n```\n\n[SCOUT FRAMEWORK 2/5]\n```json\n" + json.dumps(dict(c, framework="second")) + "\n```\n"

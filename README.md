@@ -29,7 +29,7 @@ Judge never edits a config, never re-runs to change a verdict, never sees the ev
 | `reference/TICKET_FORMAT.md` | Ticket layout and status transitions (identical copy in scout-config). |
 | `reference/RISK_FRAMEWORK.md` / `.json` | The production risk model (prose + the machine-readable twin the engine loads). |
 | `reference/WHAT_FAILED_BEFORE.md`, `RESEARCH_PRINCIPLES.md`, `GLOSSARY.md` | Context for the reading: the inherited failure patterns, the research stance, the names of the known sleeves. |
-| `examples/` | Three reference sleeves (`ref_*.json`, used for redundancy correlations) and the brief's worked example. |
+| `examples/` | Three reference sleeves (`ref_*.json`, used for redundancy correlations), the brief's worked example and an hourly example (`example_hour_of_day.json`). |
 | `tests/test_engine.py` | Offline smoke test on a synthetic bucket (noise → FAIL; planted premium → PASS). |
 | `.claude/skills` | Symlink to `.agents/skills`. |
 

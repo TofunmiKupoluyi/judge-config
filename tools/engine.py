@@ -2,12 +2,14 @@
 """Judge's engine layer. Since 2026-10-12 the headline simulator is OBSIDIAN'S PRODUCTION REPLICA (tools/obsidian_engine.py, a verbatim
 copy of backtest/engine_v2.py) run hourly on the panels of tools/panels.py — see `run_hourly` at the bottom. This file keeps:
 
-  build_signal   the trade-config DSL evaluated on the daily point-in-time fields (tools/data.py); "$param" references resolved
+  build_signal   the trade-config DSL evaluated on the point-in-time fields of the config's grid (tools/data.py: daily, or hourly when
+                 schedule.resolution is "1h"); "$param" references resolved
   build_targets  the positions rule (top/bottom N, quantile, threshold, proportional; equal / signal / rank weighting; side_gross_pct or
-                 per_name_bps; holding-period averaging; execution delay) → daily target weights, fraction of notional, pre-risk
+                 per_name_bps; holding-period averaging; execution delay) → target weights on that grid, fraction of notional, pre-risk
   simulate/run   the original DAILY simulator with a re-implementation of the risk framework — kept ONLY for the raw-sleeve diagnostic
-                 (risk=False: costs and funding, no caps / hedge) and for offline experiments; judge_run.py never uses it with risk=True
-  run_hourly     the headline: daily targets → hourly `extra` panel → obsidian_engine.run with caps, max-loss tiers, GMV cap, no-trade
+                 (risk=False: costs and funding, no caps / hedge) and for offline experiments; judge_run.py never uses it with risk=True.
+                 An hourly config's raw sleeve is `run_raw_hourly`
+  run_hourly     the headline: targets (daily held 24 h, or hourly as they are) → hourly `extra` panel → obsidian_engine.run with caps, max-loss tiers, GMV cap, no-trade
                  band, 4-hour resize gate, participation cap, BTC hedge (2% band), fee + spread tiers + impact, per-print funding;
                  drawdown governors OFF (decision 2026-10-12)
 """
@@ -24,6 +26,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 RISK = json.load(open(os.path.join(HERE, "..", "reference", "RISK_FRAMEWORK.json")))
 BTC = "BTCUSDT"
 REBAL_DAYS = {"1d": 1, "2d": 2, "3d": 3, "1w": 7, "2w": 14}
+REBAL_HOURS = {"1h": 1, "2h": 2, "4h": 4, "6h": 6, "8h": 8, "12h": 12, "1d": 24}     # resolution "1h": entries at hours divisible by n (UTC)
 
 
 # ----------------------------------------------------------------------------------------------------------- signal DSL
@@ -91,64 +94,77 @@ def build_signal(cfg, data):
 
 
 # ----------------------------------------------------------------------------------------------------------- targets
-def _rebalance_days(dates, cfg):
-    sch = cfg["schedule"]; n = REBAL_DAYS[sch["rebalance"]]
+def resolution(cfg):
+    return cfg["schedule"].get("resolution", "1d")
+
+
+def _schedule_rows(cfg, dates):
+    """(entry row positions, holding rows, delay rows) on the config's grid."""
+    sch = cfg["schedule"]
+    if resolution(cfg) == "1h":
+        if sch.get("rebalance_hours"):
+            mask = dates.hour.isin([int(h) for h in sch["rebalance_hours"]])
+        else:
+            mask = dates.hour % REBAL_HOURS[sch["rebalance"]] == 0
+        hold = _int(cfg, sch["holding_hours"]) if "holding_hours" in sch else REBAL_HOURS[sch["rebalance"]]
+        return np.flatnonzero(mask), hold, int(sch.get("delay_hours", 0))
+    n = REBAL_DAYS[sch["rebalance"]]
     if n >= 7 and sch.get("anchor", "monday") == "monday":
-        base = dates[dates.dayofweek == 0]; return base[::n // 7]
-    return dates[::n]
+        rows = np.flatnonzero(dates.dayofweek == 0)[::n // 7]
+    else:
+        rows = np.arange(0, len(dates), n)
+    hold = _int(cfg, sch["holding_days"]) if "holding_days" in sch else n
+    return rows, hold, int(sch.get("delay_days", 0))
+
+
+def _first_ranks(v, descending):
+    """1-based ranks with ties broken by position (pandas method="first")."""
+    order = np.argsort(-v if descending else v, kind="stable"); r = np.empty(len(v)); r[order] = np.arange(1, len(v) + 1); return r
 
 
 def build_targets(cfg, data, signal, universe):
-    """Per-day target weight frame (fraction of notional, pre-risk) from the positions rule, with holding-period averaging."""
+    """Target weight frame on the signal's grid (fraction of notional, pre-risk) from the positions rule, with holding-period averaging.
+    Row i is the book intended from row i on; entries are averaged over their holding rows."""
     pos = cfg["positions"]; mode = pos["mode"]; weighting = pos.get("weighting", "equal")
     side = float(pos.get("side_gross_pct", 50)) / 100.0; per_name = pos.get("per_name_bps")
     do_long, do_short = pos.get("long", True), pos.get("short", True)
-    hold = _int(cfg, cfg["schedule"]["holding_days"]) if "holding_days" in cfg["schedule"] else REBAL_DAYS[cfg["schedule"]["rebalance"]]
-    delay = int(cfg["schedule"].get("delay_days", 0))
-    rdays = _rebalance_days(data.dates, cfg); sig = signal.where(universe)
-    entries = {}   # date -> weight Series
-    for d in rdays:
-        s = sig.loc[d].dropna()
-        if len(s) < 10:
+    dates = data.dates; rows, hold, delay = _schedule_rows(cfg, dates)
+    sig = signal.reindex(index=dates, columns=data.symbols).where(universe.reindex(index=dates, columns=data.symbols).fillna(False)).to_numpy(dtype="float64")
+    n_param = max(1, _int(cfg, pos["n"])) if mode == "top_bottom_n" else None
+    q = float(_resolve(cfg, pos["quantile"])) if mode == "quantile" else None
+    T = np.zeros(sig.shape); cnt = np.zeros(len(dates)); n_entries = 0
+    for i in rows:
+        row = sig[i]; idx = np.flatnonzero(~np.isnan(row)); s = row[idx]; m = len(s)
+        if m < 10:
             continue
-        w = pd.Series(0.0, index=s.index)
         if mode == "top_bottom_n":
-            n = max(1, _int(cfg, pos["n"])); r = s.rank(method="first", ascending=False)
-            L = s[r <= n]; Sh = s[r > len(s) - n]
+            r = _first_ranks(s, descending=True); legs = (r <= n_param, r > m - n_param)
         elif mode == "quantile":
-            q = float(_resolve(cfg, pos["quantile"])); r = s.rank(pct=True, method="first")
-            L = s[r > 1 - q]; Sh = s[r <= q]
+            r = _first_ranks(s, descending=False) / m; legs = (r > 1 - q, r <= q)
         elif mode == "threshold":
-            L = s[s > float(_resolve(cfg, pos["long_above"]))] if "long_above" in pos else s.iloc[0:0]
-            Sh = s[s < float(_resolve(cfg, pos["short_below"]))] if "short_below" in pos else s.iloc[0:0]
+            legs = (s > float(_resolve(cfg, pos["long_above"])) if "long_above" in pos else np.zeros(m, bool),
+                    s < float(_resolve(cfg, pos["short_below"])) if "short_below" in pos else np.zeros(m, bool))
         else:  # proportional: all names, weight ∝ demeaned signal
-            z = s - s.mean(); L = z[z > 0]; Sh = z[z < 0]
-        def leg(x, sign):
-            if len(x) == 0:
-                return
-            if weighting == "equal" or mode == "proportional":
-                base = x.abs() if mode == "proportional" else pd.Series(1.0, index=x.index)
+            s = s - s.mean(); legs = (s > 0, s < 0)
+        w = np.zeros(sig.shape[1])
+        for sign, on, sel in ((+1, do_long, legs[0]), (-1, do_short, legs[1])):
+            if not on or not sel.any():
+                continue
+            x = s[sel]
+            if mode == "proportional":
+                base = np.abs(x)
+            elif weighting == "equal":
+                base = np.ones(len(x))
             elif weighting == "signal":                       # weight ∝ distance from the cross-sectional median (extremes get more)
-                base = (x - s.median()).abs() + 1e-12
+                base = np.abs(x - np.median(s)) + 1e-12
             else:  # rank: the most extreme name of the leg gets the largest weight on either side
-                base = (x if sign > 0 else -x).rank().astype(float)
-            base = base / base.sum()
-            w.loc[x.index] = sign * (per_name / 1e4 * len(x) if per_name else side) * base
-        if do_long:
-            leg(L, +1)
-        if do_short:
-            leg(Sh, -1)
-        entries[d] = w
-    # expand entries over the holding period (average of live entries); shift by the execution delay
-    T = pd.DataFrame(0.0, index=data.dates, columns=data.symbols); cnt = pd.Series(0, index=data.dates, dtype=float)
-    pos_idx = {d: i for i, d in enumerate(data.dates)}
-    for d, w in entries.items():
-        wv = w.reindex(data.symbols).fillna(0.0).to_numpy()  # align by label first: .iloc row writes are positional, and the panel columns are not sorted (NOS-40)
-        i0 = pos_idx[d] + delay
-        for i in range(i0, min(i0 + hold, len(data.dates))):
-            T.iloc[i] = T.iloc[i].to_numpy() + wv; cnt.iloc[i] += 1
-    T = T.div(cnt.replace(0, np.nan), axis=0).fillna(0.0)
-    return T, len(entries)
+                base = pd.Series(x if sign > 0 else -x).rank().to_numpy()
+            w[idx[sel]] = sign * (per_name / 1e4 * len(x) if per_name else side) * base / base.sum()
+        n_entries += 1; i0 = i + delay
+        T[i0:i0 + hold] += w; cnt[i0:i0 + hold] += 1
+    with np.errstate(invalid="ignore", divide="ignore"):
+        T = np.where(cnt[:, None] > 0, T / cnt[:, None], 0.0)
+    return pd.DataFrame(T, index=dates, columns=data.symbols), n_entries
 
 
 # ----------------------------------------------------------------------------------------------------------- simulation
@@ -218,7 +234,12 @@ def simulate(cfg, data, targets, risk=True, cost_mult=1.0, governor=True):
 
 def run(cfg, data, risk=True, cost_mult=1.0, governor=True, shuffle_seed=None, window=None):
     """Full pipeline for one config. window=(start,end) restricts the sim (signals still use history before start).
-    shuffle_seed: permute the signal's symbol columns (placebo) with a fixed seed."""
+    shuffle_seed: permute the signal's symbol columns (placebo) with a fixed seed. An hourly config only has the raw sleeve here
+    (risk=False, `run_raw_hourly`); its risk-framework run is `run_hourly`."""
+    if resolution(cfg) == "1h":
+        if risk or window:
+            raise ValueError("an hourly config runs under the risk framework through run_hourly; run() gives only its raw sleeve")
+        return run_raw_hourly(cfg, data, cost_mult=cost_mult, shuffle_seed=shuffle_seed)
     universe = data.eligible(**{k: v for k, v in (cfg.get("universe") or {}).items() if k in ("min_mdv_usd", "min_age_days", "exclude", "include_only")})
     signal, _ = build_signal(cfg, data)
     if shuffle_seed is not None:
@@ -232,6 +253,30 @@ def run(cfg, data, risk=True, cost_mult=1.0, governor=True, shuffle_seed=None, w
     if window:
         daily = daily[(daily.index > a) & (daily.index <= b + pd.Timedelta(days=1))]
     return daily, attr, n_rebal
+
+
+def run_raw_hourly(cfg, data, cost_mult=1.0, shuffle_seed=None):
+    """Raw sleeve of an hourly config (the daily `simulate(risk=False)` on the hourly grid): the book of row h held over the next hour,
+    price P&L and funding prints, cost = taker fee + 3 bp per unit traded, no caps / hedge. Returns (daily frame, attr, n_entries)."""
+    V = data.view("1h"); signal, _ = build_signal(cfg, V)
+    if shuffle_seed is not None:
+        rng = np.random.default_rng(shuffle_seed); perm = rng.permutation(signal.columns.values)
+        signal = pd.DataFrame(signal.values, index=signal.index, columns=perm).reindex(columns=signal.columns)
+    u = cfg.get("universe") or {}
+    universe = V.eligible(**{k: v for k, v in u.items() if k in ("min_mdv_usd", "min_age_days", "exclude", "include_only")})
+    T, n = build_targets(cfg, V, signal, universe); w = T.to_numpy()
+    ret = V.field("ret").fillna(0.0).to_numpy(); fund = V.field("funding").fillna(0.0).to_numpy()
+    cost_bps = RISK["cost_model"]["taker_fee_bps"] * cost_mult + 3.0 * cost_mult
+    traded = np.abs(np.diff(w, axis=0, prepend=np.zeros((1, w.shape[1])))).sum(axis=1)
+    price = (w[:-1] * ret[1:]).sum(axis=1); funding = -(w[:-1] * fund[1:]).sum(axis=1); costs = traded[:-1] * cost_bps * 1e-4
+    idx = V.dates[:-1] - pd.Timedelta(hours=1)                                       # open-time stamps, as run_hourly's NAV
+    h = pd.DataFrame({"ret": price + funding - costs, "costs": costs, "funding": funding, "turnover": traded[:-1], "gross": np.abs(w[:-1]).sum(axis=1)}, index=idx)
+    nav = (1 + h["ret"]).cumprod(); daily = pd.DataFrame({"ret": nav.resample("1D").last().pct_change(fill_method=None)})
+    g = h.groupby(h.index.floor("D"))
+    for c, how in (("costs", "sum"), ("funding", "sum"), ("turnover", "sum"), ("gross", "mean")):
+        daily[c] = getattr(g[c], how)().reindex(daily.index)
+    attr = pd.Series((w[:-1] * (ret[1:] - fund[1:])).sum(axis=0), index=T.columns)
+    return daily.iloc[1:].fillna({"ret": 0.0}), attr, n
 
 
 def with_params(cfg, overrides):
@@ -273,15 +318,19 @@ def targets_hourly(T, hidx):
 def run_hourly(cfg, data, panels, cost_mult=1.0, shuffle_seed=None, window=None, record=False):
     """Judge's production-replica run. Returns (daily frame, per-name price-P&L attribution, n_rebalance_days) in the same shape as `run`.
     window = (a, b) restricts the simulation to that hourly segment (the calibration sweep)."""
-    signal, _ = build_signal(cfg, data)
+    hourly = resolution(cfg) == "1h"; V = data.view(resolution(cfg))
+    signal, _ = build_signal(cfg, V)
     if shuffle_seed is not None:
         rng = np.random.default_rng(shuffle_seed); perm = rng.permutation(signal.columns.values)
         signal = pd.DataFrame(signal.values, index=signal.index, columns=perm).reindex(columns=signal.columns)
     u = cfg.get("universe", {})
-    universe = data.eligible(u.get("min_mdv_usd", 3e6), u.get("min_age_days", 30), tuple(u.get("exclude", [BTC])), u.get("include_only"))
-    T, n_rebal = build_targets(cfg, data, signal, universe)
-    cols = panels["close"].columns
-    extra = targets_hourly(T.reindex(columns=cols).fillna(0.0), panels["hidx"]).astype("float32")   # on the FULL index: the window's
+    universe = V.eligible(u.get("min_mdv_usd", 3e6), u.get("min_age_days", 30), tuple(u.get("exclude", [BTC])), u.get("include_only"))
+    T, n_rebal = build_targets(cfg, V, signal, universe)
+    cols = panels["close"].columns; T = T.reindex(columns=cols).fillna(0.0)
+    if hourly:                                                       # row h = book from h → the bar opening at h−1h closes at h, where it trades
+        T.index = T.index - pd.Timedelta(hours=1); extra = T.reindex(panels["hidx"]).fillna(0.0).astype("float32")
+    else:
+        extra = targets_hourly(T, panels["hidx"]).astype("float32")  # on the FULL index: the window's
     P = panels                                                                                         # first day already carries its book
     if window is not None:
         P = __import__("panels").slice_panels(panels, *window); extra = extra.loc[P["hidx"][0]:P["hidx"][-1]]

@@ -23,11 +23,17 @@ Fields (keep in sync with tools/validate_config.py FIELDS and the trade-config-s
   vol30          30-day std of daily ret
   oi_usd         open interest in $ at the last 5-minute snapshot of day t−1;  oi_change_1d = oi_usd / prior − 1
   ls_ratio_acct, ls_ratio_top_acct, ls_ratio_top_pos, taker_ls_vol   Binance positioning ratios, last snapshot of day t−1
-  age_days       days since the first candle;  mcap = NaN until provisioned
+  age_days       days since the first candle;  dow = weekday of t (0 = Monday);  mcap = NaN until provisioned
 Universe helpers: `eligible(min_mdv_usd, min_age_days)` (hysteresis enter ≥ min, stay ≥ 2/3 min; delisting ramp: out 7 days before
 the data ends), `beta` (60-day hourly beta to BTC, lagged), `mdv_tier` for cost tiers.
 
     from data import Data; d = Data("s3://…/v1/binance/um" or "/local/mirror", start="2021-10-01", end="2026-09-30"); d.field("funding")
+
+Hourly resolution (`schedule.resolution: "1h"`): `Data(..., panels=P, hourly=True).view("1h")` is the same interface on an hourly grid.
+Row h = the hour boundary h; it contains only bars that closed by h. The bar fields are that hour's bar (the one ending at h):
+  close, ret, log_ret, btc_ret, resid_ret (60-day hourly beta lagged one hour), high, low, range_pct, volume_usd, taker_buy_usd,
+  taker_sell_usd, taker_imbalance, n_trades, funding (prints settled in the hour, known at its end); hour_utc = h's UTC hour
+  (the hour the book is entered), dow = h's weekday. Every other field is the daily value from the last 00:00 at or before h.
 """
 from __future__ import annotations
 
@@ -82,9 +88,12 @@ def _years(root, sub):
 
 
 class Data:
-    def __init__(self, root, start="2021-10-01", end="2026-12-31", perp_only=True, panels=None):
+    def __init__(self, root, start="2021-10-01", end="2026-12-31", perp_only=True, panels=None, hourly=False):
         """panels: the hourly frames from tools/panels.py (open-time stamped) — when given, the daily fields are built from them
-        (one load of the bucket for both engines; symbols and universe identical); otherwise the klines are read here."""
+        (one load of the bucket for both engines; symbols and universe identical); otherwise the klines are read here.
+        hourly: keep the hourly bars for `view("1h")` (needs panels; costs the memory of the kept frames)."""
+        if hourly and panels is None:
+            raise ValueError("hourly fields need the panels (tools/panels.py)")
         self.root = root.rstrip("/"); self.start = pd.Timestamp(start, tz="UTC"); self.end = pd.Timestamp(end, tz="UTC") + pd.Timedelta(hours=23)
         if panels is not None:
             sh = lambda f: f.set_axis(f.index + pd.Timedelta(hours=1), copy=False)         # open-time stamp -> close-time stamp (no copy)  # noqa: E731
@@ -172,9 +181,13 @@ class Data:
             log(f"data: taker_flow unavailable ({e})")
             for col in TAKER_FLOW_FIELDS:
                 F[col] = pd.DataFrame(np.nan, index=self.dates, columns=self.symbols)
+        F["dow"] = pd.DataFrame({s: self.dates.dayofweek for s in self.symbols}, index=self.dates).astype("float64")
         F["mcap"] = pd.DataFrame(np.nan, index=self.dates, columns=self.symbols)
         self.F = {k: v.reindex(index=self.dates, columns=self.symbols).astype("float64") for k, v in F.items()}
         self.last_valid = last; self.hourly_close = close_h if panels is None else None; self.hourly_end = close_h.index[-1]
+        self._bars = ({"close": close_h, "qv": qv_h, "tbq": tbq_h, "high": high_h, "low": low_h, "trades": ntr_h, "fund": fund_src,
+                       "beta": sh(panels["beta_btc"])} if hourly else None)
+        self._hourly = None
         del qv_h, tbq_h, high_h, low_h, ntr_h, close_h; gc.collect()
         log(f"data: {len(self.dates)} days × {len(self.symbols)} symbols, {self.dates[0].date()} → {self.dates[-1].date()}")
 
@@ -187,6 +200,18 @@ class Data:
         if name not in self.F:
             raise KeyError(f"unknown field {name!r}; known: {sorted(self.F)}")
         return self.F[name]
+
+    def view(self, resolution="1d"):
+        """The field interface (`dates`, `symbols`, `field`, `eligible`) on the config's grid: self for 1d, HourlyView for 1h."""
+        if resolution == "1d":
+            return self
+        if resolution != "1h":
+            raise ValueError(f"unknown resolution {resolution!r}")
+        if self._bars is None:
+            raise ValueError("hourly fields were not kept: build Data(..., panels=P, hourly=True)")
+        if self._hourly is None:
+            self._hourly = HourlyView(self)
+        return self._hourly
 
     def eligible(self, min_mdv_usd=3e6, min_age_days=30, exclude=(BTC,), include_only=None):
         mdv = self.F["mdv21"]; enter = (mdv >= min_mdv_usd) & self.F["close"].notna(); stay = (mdv >= min_mdv_usd * 2 / 3) & self.F["close"].notna()
@@ -207,3 +232,57 @@ class Data:
     def mdv_tier_bps(self):
         """Half-spread tier by MDV21 (1 / 3 / 8 bp) per the risk framework."""
         m = self.F["mdv21"]; return pd.DataFrame(np.where(m >= 100e6, 1.0, np.where(m >= 20e6, 3.0, 8.0)), index=m.index, columns=m.columns).where(m.notna(), 8.0)
+
+
+BAR_FIELDS_1H = ("close", "ret", "log_ret", "btc_ret", "resid_ret", "high", "low", "range_pct", "volume_usd", "taker_buy_usd", "taker_sell_usd",
+                 "taker_imbalance", "n_trades", "funding", "hour_utc", "dow")
+
+
+class HourlyView:
+    """The fields on the hourly grid (index = close-time hour stamps; row h holds only bars closed by h). Bar fields are the hour's bar;
+    daily fields are carried from the last 00:00 at or before h. Built lazily and cached: a config only pays for the fields it names."""
+
+    def __init__(self, data):
+        self._d = data; self._b = data._bars; self.dates = self._b["close"].index; self.symbols = data.symbols; self._cache = {}
+
+    def field(self, name):
+        if name not in self._cache:
+            self._cache[name] = self._build(name).reindex(index=self.dates, columns=self.symbols).astype("float64")
+        return self._cache[name]
+
+    def eligible(self, min_mdv_usd=3e6, min_age_days=30, exclude=(BTC,), include_only=None):
+        u = self._d.eligible(min_mdv_usd, min_age_days, exclude, include_only)
+        return u.astype("float64").reindex(self.dates, method="ffill").fillna(0.0) > 0
+
+    def _build(self, name):
+        b = self._b
+        if name not in BAR_FIELDS_1H:
+            return self._d.field(name).reindex(self.dates, method="ffill")
+        if name == "close":
+            return b["close"]
+        if name == "ret":
+            return b["close"] / b["close"].shift(1) - 1.0
+        if name == "log_ret":
+            return np.log(b["close"]).diff()
+        if name == "btc_ret":
+            r = self.field("ret")[BTC]; return pd.DataFrame({s: r for s in self.symbols}, index=self.dates)
+        if name == "resid_ret":
+            return self.field("ret") - b["beta"].astype("float64").shift(1) * self.field("btc_ret")
+        if name in ("high", "low"):
+            return b[name]
+        if name == "range_pct":
+            return (self.field("high") - self.field("low")) / self.field("close").shift(1)
+        if name == "volume_usd":
+            return b["qv"]
+        if name == "taker_buy_usd":
+            return b["tbq"]
+        if name == "taker_sell_usd":
+            return self.field("volume_usd") - self.field("taker_buy_usd")
+        if name == "taker_imbalance":
+            return (self.field("taker_buy_usd") - self.field("taker_sell_usd")) / self.field("volume_usd").replace(0, np.nan)
+        if name == "n_trades":
+            return b["trades"]
+        if name == "funding":
+            return b["fund"]
+        stamp = self.dates.hour if name == "hour_utc" else self.dates.dayofweek
+        return pd.DataFrame({s: stamp for s in self.symbols}, index=self.dates)
